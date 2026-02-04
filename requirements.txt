@@ -1,0 +1,18 @@
+# SonIA WhatsApp Agent - Dependencies
+# BloomsPal / Andean Fields
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# HTTP Client
+httpx==0.26.0
+
+# Anthropic Claude API
+anthropic==0.43.0
+
+# Data validation
+pydantic==2.5.3
+
+# Environment variables
+python-dotenv==1.0.0
