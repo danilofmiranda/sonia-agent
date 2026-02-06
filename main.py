@@ -557,7 +557,7 @@ Si es una conversación general:
 IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JSON.
 
 Siempre responde en español, de forma amigable y profesional.
-Origen de envíos: Miami, FL 33166, USA (BloomsPal warehouse)"""
+Origen de envíos: Bogotá, Colombia, CP 110111 (Oficina Andean Fields)"""
 
     def __init__(self):
         # CORREGIDO: Usar cliente ASÍNCRONO en vez de síncrono
@@ -708,8 +708,8 @@ class QuoteCalculator:
         # Regla 2: Todo lo demás = cotizar con FedEx API
         try:
             fedex_response = await self.fedex.get_rate_quote(
-                origin_postal="33166",
-                origin_country="US",
+                origin_postal="110111",
+                origin_country="CO",
                 dest_postal=quote_data.get("destination_postal", ""),
                 dest_country=dest_country,
                 weight_kg=weight_kg,
