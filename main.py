@@ -841,6 +841,15 @@ Si un usuario REGISTRADO dice "soy empleado", "trabajo en BloomsPal", "soy de Bl
     "message": "Mensaje confirmando que se registró como empleado"
 }
 
+Si un usuario registrado dice "llámame...", "dime...", "me gusta que me llamen...", "preféro que me digan..." o similar:
+{
+    "action": "update_nickname",
+    "data": {
+        "nickname": "el nuevo apodo que quiere"
+    },
+    "message": "Tu mensaje confirmando el cambio de nombre"
+}
+
 REGLAS DE NOMBRE:
 - Si el contexto incluye un nombre/nickname, SIEMPRE úsalo para personalizar tus respuestas
 - Sé amigable y cercana, como una amiga que ayuda
@@ -1947,6 +1956,27 @@ Nuestro equipo de ventas revisará los detalles y te contactará para confirmar 
             logger.info(f"👤 Usuario registrado: {nombre} ({cliente}) - {from_number}")
 
         # Si alguien dice que es empleado
+        elif action == "update_nickname":
+            new_nick = response.get("data", {}).get("nickname", "")
+            if user_data and new_nick:
+                try:
+                    odoo_nick = OdooClient()
+                    row_to_update = user_data.get('row', 0)
+                    if row_to_update == 0:
+                        found = odoo_nick.find_user_by_phone(from_number)
+                        if found:
+                            row_to_update = found.get('row', 0)
+                    if row_to_update > 0:
+                        odoo_nick.update_spreadsheet_cell(row_to_update, 2, new_nick)
+                        logger.info(f"✏️ Nickname actualizado en spreadsheet fila {row_to_update}: {new_nick}")
+                except Exception as e:
+                    logger.error(f"❌ Error actualizando nickname en spreadsheet: {e}")
+                user_data['nickname'] = new_nick
+                user_cache.set(from_number, user_data)
+                save_user_to_db(from_number, user_data.get('cliente', ''), user_data.get('nombre', ''),
+                                new_nick, user_data.get('rol', 'cliente'), user_data.get('row', 0))
+                logger.info(f"✏️ Nickname actualizado: {new_nick} para {from_number}")
+
         elif action == "claim_employee":
             if user_data:
                 try:
