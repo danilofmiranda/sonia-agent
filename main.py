@@ -1,10 +1,10 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         SonIA - WhatsApp Quotation Agent                       ║
-║                              BloomsPal Logistics                         ║
+║                              BloomsPal                         ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
-Agente de WhatsApp para cotizaciones de envío - BloomsPal Logistics.
+Agente de WhatsApp para cotizaciones de envío - BloomsPal.
 - Recibe mensajes de texto y audio via WhatsApp
 - Procesa con Claude AI para extraer información
 - Consulta FedEx API para cotizaciones
@@ -666,8 +666,15 @@ class FedExClient:
 class SonIAProcessor:
     """Procesador de mensajes usando Claude AI"""
 
-    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de BloomsPal Logistics.
+    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de BloomsPal.
 Tu trabajo es ayudar a los clientes con cotizaciones de envío y rastreo de guías.
+
+ESTILO DE COMUNICACIÓN:
+- Tono amigable, profesional y siempre dispuesta a ayudar
+- Respuestas CONCISAS y directas, sin rodeos innecesarios
+- Cuando necesites pedir información al usuario, usa bullet points para dar claridad
+- No repitas información que el usuario ya te dio
+- Sé cálida pero eficiente
 
 INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
 1. País de ORIGEN del envío
@@ -757,7 +764,7 @@ CÓMO DETECTAR SOLICITUDES DE RASTREO:
 IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JSON.
 
 Siempre responde en español, de forma amigable y profesional.
-IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico al cliente. Siempre habla de "BloomsPal Logistics" como el servicio de envío. No reveles nombres de transportistas.
+IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico al cliente. Siempre habla de "BloomsPal" como el servicio de envío. No reveles nombres de transportistas.
 
 
 SOPORTE Y CONTACTO (ODOO):
@@ -821,7 +828,7 @@ IDENTIFICACIÓN DE USUARIO:
 Al inicio de cada conversación se te proporcionará un CONTEXTO USUARIO con información del usuario.
 
 Si el usuario es NUEVO (no registrado):
-- Preséntate como SonIA de BloomsPal Logistics
+- Preséntate como SonIA de BloomsPal
 - Pregúntale su nombre completo y a qué empresa pertenece
 - Pregúntale: "¿Hay algún nombre o apodo por el que prefieras que te llame?"
 - Si no quiere nickname, déjalo vacío
@@ -857,7 +864,7 @@ REGLAS DE NOMBRE:
 - NUNCA preguntes a un cliente si es empleado. Solo el usuario puede decirte que es empleado
 - Si el usuario ya está registrado, NO vuelvas a pedir su nombre
 
-Empresa: BloomsPal Logistics"""
+Empresa: BloomsPal"""
 
     def __init__(self):
         # CORREGIDO: Usar cliente ASÍNCRONO en vez de síncrono
@@ -1554,7 +1561,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SonIA - WhatsApp Quotation Agent",
-    description="Agente de WhatsApp para cotizaciones de envío - BloomsPal Logistics",
+    description="Agente de WhatsApp para cotizaciones de envío - BloomsPal",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -1572,7 +1579,7 @@ async def root():
         "status": "online",
         "service": "SonIA WhatsApp Agent",
         "version": "1.0.0",
-        "company": "BloomsPal Logistics"
+        "company": "BloomsPal"
     }
 
 
@@ -1804,7 +1811,7 @@ async def handle_webhook(request: Request):
                 num_pkgs = len(quote_data.get('packages', [])) or quote_data.get('num_boxes', 1)
                 declared_val = quote_data.get('declared_value', 0)
 
-                response_message = f"""✅ *COTIZACIÓN BloomsPal Logistics*
+                response_message = f"""✅ *COTIZACIÓN BloomsPal*
 
 📤 *Origen:* {origin_info} (CP {quote_data.get('origin_postal', '')})
 📍 *Destino:* {dest_info} (CP {quote_data.get('destination_postal', '')})
@@ -1815,7 +1822,7 @@ async def handle_webhook(request: Request):
 📆 *Fecha de salida:* {quote_data.get('shipping_date', 'Por confirmar')}
 
 💰 *PRECIO MÁS ECONÓMICO: ${quote_result['amount']:.2f} USD*
-🏷️ *Servicio:* {'BloomsPal Logistics'}
+🏷️ *Servicio:* {'BloomsPal'}
 📅 *Tiempo estimado:* {quote_result.get('transit_days', 'N/A')} días
 ⚖️ *Costo por kilo:* ${quote_result['amount'] / quote_data.get('weight_kg', 1):.2f} USD/kg
 
@@ -1851,7 +1858,7 @@ async def handle_webhook(request: Request):
                 carrier_status = track_result["carrier_status"]
                 last_events = track_result["last_events"]
 
-                response_message = f"""📦 *RASTREO BloomsPal Logistics*
+                response_message = f"""📦 *RASTREO BloomsPal*
 
 🔍 *Guía:* {track_result['tracking_number']}
 📊 *SonIA Status:* {sonia_status}
