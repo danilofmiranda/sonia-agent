@@ -361,6 +361,55 @@ class WhatsAppClient:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# NORMALIZACIÓN DE ESTADOS DE ENVÍO
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_short_status(status_code: str, description: str) -> str:
+    """Normaliza estado del transportista a status corto de SonIA"""
+    code_upper = (status_code or "").upper()
+    desc_lower = (description or "").lower()
+
+    # Prioridad 1: Mapeo por código
+    code_map = {
+        "DL": "Delivered",
+        "IT": "In Transit",
+        "PU": "Picked Up",
+        "OD": "Out for Delivery",
+        "CD": "In Customs",
+        "IN": "Label Created",
+        "SP": "Label Created",
+        "PL": "Label Created",
+        "DE": "Exception",
+        "SE": "Exception",
+        "OC": "Exception",
+    }
+    if code_upper in code_map:
+        return code_map[code_upper]
+
+    # Prioridad 2: Mapeo por descripción
+    if "delivered" in desc_lower:
+        return "Delivered"
+    elif "out for delivery" in desc_lower:
+        return "Out for Delivery"
+    elif "picked up" in desc_lower or "package received" in desc_lower:
+        return "Picked Up"
+    elif any(w in desc_lower for w in ["in transit", "departed", "arrived", "on fedex vehicle", "left origin"]):
+        return "In Transit"
+    elif "clearance" in desc_lower or "customs" in desc_lower:
+        return "In Customs"
+    elif "delay" in desc_lower:
+        return "Delayed"
+    elif "exception" in desc_lower or "hold" in desc_lower:
+        return "Exception"
+    elif "return" in desc_lower:
+        return "Returned to Sender"
+    elif "shipment information sent" in desc_lower or "label" in desc_lower:
+        return "Label Created"
+    else:
+        return description or "Unknown"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLIENTE FEDEX
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -534,6 +583,52 @@ class FedExClient:
             logger.error(f"❌ Error consultando FedEx: {e}")
             return {"error": str(e)}
 
+    async def track_shipment(self, tracking_number: str) -> Dict:
+        """Obtiene información de rastreo de FedEx Track API"""
+
+        if not self.token:
+            token = await self.get_token()
+            if not token:
+                return {"error": "No se pudo autenticar con el sistema de rastreo"}
+
+        url = f"{self.base_url}/track/v1/trackingnumbers"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "X-locale": "en_US"
+        }
+
+        payload = {
+            "includeDetailedScans": True,
+            "trackingInfo": [
+                {
+                    "trackingNumberInfo": {
+                        "trackingNumber": tracking_number
+                    }
+                }
+            ]
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(url, headers=headers, json=payload)
+
+                if response.status_code == 401:
+                    logger.info("🔄 Token expirado, renovando para tracking...")
+                    await self.get_token()
+                    headers["Authorization"] = f"Bearer {self.token}"
+                    response = await client.post(url, headers=headers, json=payload)
+
+                if response.status_code != 200:
+                    logger.error(f"❌ FedEx Track error: {response.status_code} - {response.text[:500]}")
+                    return {"error": f"Error del sistema de rastreo: {response.status_code}"}
+
+                logger.info(f"✅ FedEx Track API respondió exitosamente para {tracking_number}")
+                return response.json()
+        except Exception as e:
+            logger.error(f"❌ Error rastreando con FedEx: {e}")
+            return {"error": str(e)}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROCESADOR DE IA (CLAUDE)
@@ -542,8 +637,8 @@ class FedExClient:
 class SonIAProcessor:
     """Procesador de mensajes usando Claude AI"""
 
-    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de cotizaciones de BloomsPal Logistics.
-Tu trabajo es ayudar a los clientes a obtener cotizaciones de envío.
+    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de BloomsPal Logistics.
+Tu trabajo es ayudar a los clientes con cotizaciones de envío y rastreo de guías.
 
 INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
 1. País de ORIGEN del envío
@@ -616,6 +711,19 @@ Si es una conversación general:
     "action": "chat",
     "message": "Tu respuesta conversacional"
 }
+
+RASTREO DE ENVÍOS:
+Si el cliente envía un número de rastreo (9-30 dígitos) o pregunta por el estado de un envío/guía:
+{
+    "action": "track",
+    "tracking_number": "794629639030",
+    "message": "Consultando el estado de tu envío..."
+}
+
+CÓMO DETECTAR SOLICITUDES DE RASTREO:
+- El cliente envía un número largo (9-30 dígitos) sin contexto de cotización
+- Usa palabras como "rastrear", "tracking", "guía", "estado del envío", "dónde está mi paquete", "seguimiento"
+- Si el cliente pide rastreo pero NO da número, usa action "ask" pidiendo el tracking_number
 
 IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JSON.
 
@@ -880,6 +988,92 @@ class QuoteCalculator:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PROCESADOR DE RASTREO
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TrackingProcessor:
+    """Procesa información de rastreo de envíos"""
+
+    def __init__(self):
+        self.fedex = FedExClient()
+
+    async def track(self, tracking_number: str) -> Dict:
+        """Obtiene y procesa información de rastreo"""
+
+        # Validar formato
+        clean_number = tracking_number.strip()
+        if not clean_number or len(clean_number) < 9:
+            return {"success": False, "error": "Número de rastreo inválido"}
+
+        logger.info(f"🔍 Rastreando envío: {clean_number}")
+
+        # Llamar a FedEx Track API
+        fedex_response = await self.fedex.track_shipment(clean_number)
+
+        if "error" in fedex_response:
+            return {"success": False, "error": fedex_response["error"]}
+
+        # Parsear respuesta
+        try:
+            track_results = fedex_response.get("output", {}).get("completeTrackResults", [])
+            if not track_results:
+                return {"success": False, "error": "Número de rastreo no encontrado en el sistema"}
+
+            track_detail = track_results[0].get("trackResults", [{}])[0]
+
+            # Verificar si hay error en el tracking
+            if track_detail.get("error"):
+                error_msg = track_detail["error"].get("message", "Guía no encontrada")
+                logger.warning(f"⚠️ FedEx track error para {clean_number}: {error_msg}")
+                return {"success": False, "error": "Número de rastreo no encontrado. Verifica que sea correcto."}
+
+            # Estado principal
+            status_detail = track_detail.get("latestStatusDetail", {})
+            status_code = status_detail.get("code", "")
+            status_description = status_detail.get("description", "")
+
+            sonia_status = get_short_status(status_code, status_description)
+            logger.info(f"📊 Estado: {sonia_status} (código: {status_code}, desc: {status_description})")
+
+            # Extraer últimos 3 scan events
+            scan_events = track_detail.get("scanEvents", [])
+            last_events = []
+
+            for event in scan_events[:3]:
+                event_date_raw = event.get("date", "")
+                event_desc = event.get("eventDescription", "")
+                event_city = event.get("scanLocation", {}).get("city", "")
+                event_country = event.get("scanLocation", {}).get("countryCode", "")
+
+                # Formatear fecha ISO8601
+                formatted_date = ""
+                if event_date_raw:
+                    try:
+                        dt = datetime.fromisoformat(event_date_raw.replace("Z", "+00:00"))
+                        formatted_date = dt.strftime("%d/%m/%Y %H:%M")
+                    except Exception:
+                        formatted_date = event_date_raw[:16]
+
+                location = f" ({event_city}, {event_country})" if event_city else ""
+                last_events.append({
+                    "date": formatted_date,
+                    "description": f"{event_desc}{location}"
+                })
+
+            return {
+                "success": True,
+                "tracking_number": clean_number,
+                "sonia_status": sonia_status,
+                "carrier_status": status_description,
+                "last_events": last_events
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error procesando respuesta de rastreo: {e}")
+            return {"success": False, "error": f"Error procesando información: {str(e)}"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # APLICACIÓN FASTAPI
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1097,6 +1291,38 @@ async def handle_webhook(request: Request):
                 save_quotation(conversation_id, from_number, quote_data)
             else:
                 response_message = f"❌ {quote_result['details']}\n\nPor favor verifica la información e intenta de nuevo."
+
+        # Si es una solicitud de rastreo
+        elif action == "track":
+            tracking_number = response.get("tracking_number", "")
+            logger.info(f"📦 Procesando rastreo para: {tracking_number}")
+
+            tracker = TrackingProcessor()
+            track_result = await tracker.track(tracking_number)
+
+            if track_result["success"]:
+                sonia_status = track_result["sonia_status"]
+                carrier_status = track_result["carrier_status"]
+                last_events = track_result["last_events"]
+
+                response_message = f"""📦 *RASTREO BloomsPal Logistics*
+
+🔍 *Guía:* {track_result['tracking_number']}
+📊 *SonIA Status:* {sonia_status}
+📝 *Estado:* {carrier_status}
+
+📋 *Últimas actualizaciones:*"""
+
+                if last_events:
+                    for i, event in enumerate(last_events, 1):
+                        response_message += f"\n{i}. {event['date']} - {event['description']}"
+                else:
+                    response_message += "\nNo hay actualizaciones disponibles aún."
+
+                response_message += "\n\n¿Necesitas algo más? Puedo ayudarte con otra guía o una cotización."
+            else:
+                error_msg = track_result.get("error", "Error desconocido")
+                response_message = f"❌ {error_msg}\n\nPor favor verifica el número de rastreo e intenta de nuevo, o escríbeme si necesitas ayuda."
 
         # Validar que hay mensaje para enviar
         if not response_message:
