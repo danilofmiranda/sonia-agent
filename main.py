@@ -1056,6 +1056,7 @@ async def handle_webhook(request: Request):
 💰 *PRECIO MÁS ECONÓMICO: ${quote_result['amount']:.2f} USD*
 🏷️ *Servicio:* {quote_result.get('service_name', quote_result.get('service_type', 'FedEx'))}
 📅 *Tiempo estimado:* {quote_result.get('transit_days', 'N/A')} días
+⚖️ *Costo por kilo:* ${quote_result['amount'] / quote_data.get('weight_kg', 1):.2f} USD/kg
 
 📝 {quote_result['details']}"""
 
