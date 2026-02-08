@@ -1708,7 +1708,7 @@ async def handle_webhook(request: Request):
                     if user_text.strip() == fresh_clave.strip():
                         user_cache.mark_employee_validated(from_number)
                         dn = get_display_name(user_data)
-                       response_message = f"✅ Clave verificada. ¡Bienvenido/a {dn}! ¿En qué puedo ayudarte hoy?"
+                        response_message = f"✅ Clave verificada. ¡Bienvenido/a {dn}! ¿En qué puedo ayudarte hoy?"
                     else:
                         response_message = "❌ Clave incorrecta. Intenta de nuevo escribiendo tu clave."
                         user_cache.set_pending_key(from_number)
