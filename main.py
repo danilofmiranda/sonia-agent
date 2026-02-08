@@ -489,6 +489,7 @@ class FedExClient:
                 },
                 "pickupType": "CONTACT_FEDEX_TO_SCHEDULE",
                 "rateRequestType": ["ACCOUNT", "LIST"],
+                "preferredCurrency": "USD",
                 "packageCount": len(package_line_items),
                 "requestedPackageLineItems": package_line_items
             }
@@ -782,24 +783,44 @@ class QuoteCalculator:
                 declared_value=declared_value
             )
 
+            # Extraer el precio de la respuesta de FedEx
+            logger.info(f"\U0001f4cb FedEx response keys: {list(fedex_response.keys()) if isinstance(fedex_response, dict) else 'not a dict'}")
             if "output" in fedex_response:
                 rate_details = fedex_response["output"].get("rateReplyDetails", [])
+                # Log de la primera respuesta para verificar moneda
+                if rate_details:
+                    first_rate = rate_details[0]
+                    first_shipment = first_rate.get("ratedShipmentDetails", [{}])[0]
+                    logger.info(f"\U0001f4b0 FedEx primer servicio: {first_rate.get('serviceType')} - charge={first_shipment.get('totalNetCharge')} currency={first_shipment.get('currency', 'NOT_SET')}")
                 if rate_details:
                     all_services = []
                     for rate in rate_details:
                         rated_shipment = rate.get("ratedShipmentDetails", [{}])[0]
                         total_charge = rated_shipment.get("totalNetCharge", 0)
+                        response_currency = rated_shipment.get("currency", "USD")
                         service_type = rate.get("serviceType", "")
                         service_name = rate.get("serviceName", service_type)
                         transit_days = rate.get("commit", {}).get("transitDays", {})
                         if isinstance(transit_days, dict):
                             transit_days = transit_days.get("description", "N/A")
 
+                        charge_float = round(float(total_charge), 2)
+
+                        # Si FedEx devuelve en COP a pesar del preferredCurrency, convertir a USD
+                        if response_currency == "COP":
+                            cop_to_usd_rate = 4200  # 1 USD ~ 4200 COP
+                            charge_usd = round(charge_float / cop_to_usd_rate, 2)
+                            logger.info(f"\U0001f4b1 Moneda FedEx: COP - Convirtiendo ${charge_float:,.0f} COP -> ${charge_usd:.2f} USD (tasa {cop_to_usd_rate})")
+                            charge_float = charge_usd
+                        elif response_currency != "USD":
+                            logger.warning(f"\u26a0\ufe0f Moneda inesperada de FedEx: {response_currency} (valor: {charge_float})")
+
                         all_services.append({
                             "service_type": service_type,
                             "service_name": service_name,
-                            "total_charge": round(float(total_charge), 2),
-                            "transit_days": str(transit_days)
+                            "total_charge": charge_float,
+                            "transit_days": str(transit_days),
+                            "original_currency": response_currency
                         })
 
                     all_services.sort(key=lambda x: x["total_charge"])
