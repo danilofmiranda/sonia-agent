@@ -73,6 +73,7 @@ ODOO_DB = os.getenv("ODOO_DB", "bloomspal")
 ODOO_USER = os.getenv("ODOO_USER", "danilo@bloomspal.com")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "")
 ODOO_HELPDESK_TEAM_ID = int(os.getenv("ODOO_HELPDESK_TEAM_ID", "1"))
+ODOO_SALES_TEAM_ID = int(os.getenv("ODOO_SALES_TEAM_ID", "7"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VALIDACIÓN DE VARIABLES CRÍTICAS AL INICIAR
@@ -742,15 +743,22 @@ IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico
 
 
 SOPORTE Y CONTACTO (ODOO):
+IMPORTANTE - ANTES de crear CUALQUIER ticket (soporte u orden):
+- SIEMPRE pregunta al cliente: "¿Cuál es el nombre de tu compañía?" y "¿Cuál es tu nombre?"
+- NO generes el JSON de action "support" ni "order" hasta tener AMBOS datos (nombre persona + compañía)
+- Usa action "chat" para hacer las preguntas primero
+
 Si el cliente necesita:
-1. Crear un caso de soporte/queja/reclamo:
+1. Crear un caso de soporte/queja/reclamo (SOLO cuando ya tengas nombre y compañía):
 {
     "action": "support",
     "data": {
         "subject": "Resumen breve del problema",
-        "description": "Descripción detallada del problema o solicitud del cliente"
+        "description": "Descripción detallada incluyendo nombre del contacto, compañía y detalles del problema",
+        "company_name": "Nombre de la compañía del cliente",
+        "contact_name": "Nombre de la persona"
     },
-    "message": "Voy a crear un caso de soporte para ti..."
+    "message": "He creado tu caso de soporte..."
 }
 
 2. Buscar un contacto de BloomsPal o preguntar por alguien:
@@ -762,9 +770,29 @@ Si el cliente necesita:
     "message": "Buscando la información de contacto..."
 }
 
+3. OPORTUNIDAD DE VENTA - Cuando el cliente dice SÍ/proceder/confirmar después de una cotización:
+IMPORTANTE: Antes de crear la orden, pregunta "¿Cuál es el nombre de tu compañía?" y "¿Cuál es tu nombre?"
+{
+    "action": "order",
+    "data": {
+        "company_name": "Nombre de la compañía del cliente",
+        "contact_name": "Nombre de la persona",
+        "quote_summary": "Resumen COMPLETO de la cotización: origen, destino, peso, dimensiones de cada caja, número de cajas, valor declarado, fecha de envío, precio cotizado por servicio, y todos los detalles necesarios para que el equipo cree un lead y cotice manualmente sin necesitar más información"
+    },
+    "message": "Estoy registrando tu orden de envío..."
+}
+
 CÓMO DETECTAR SOLICITUDES DE SOPORTE:
 - Palabras: "queja", "reclamo", "problema", "soporte", "ayuda con mi envío", "daño", "pérdida", "retraso", "caso", "ticket"
-- Siempre pregunta detalles del problema antes de crear el ticket
+- PRIMERO pregunta el nombre del contacto y el nombre de la compañía
+- Luego pregunta detalles del problema
+- Solo cuando tengas toda la info, genera el JSON con action "support"
+
+CÓMO DETECTAR CONFIRMACIÓN DE ORDEN:
+- Palabras: "sí", "si", "proceder", "confirmar", "adelante", "sí quiero", "vamos", "acepto", "de acuerdo"
+- Solo aplica si previamente se presentó una cotización en la conversación
+- PRIMERO pregunta el nombre del contacto y el nombre de la compañía
+- Luego genera el JSON con action "order" incluyendo TODOS los detalles de la cotización
 
 CÓMO DETECTAR SOLICITUDES DE CONTACTO:
 - Palabras: "contactar", "hablar con", "teléfono de", "email de", "quién maneja", "responsable de"
@@ -1159,7 +1187,7 @@ class OdooClient:
             logger.error(f"❌ Error Odoo {model}.{method}: {e}")
             return None
 
-    def create_ticket(self, name: str, description: str, phone: str = None) -> Dict:
+    def create_ticket(self, name: str, description: str, phone: str = None, team_id: int = None) -> Dict:
         """Crea un ticket de soporte en Odoo Helpdesk"""
         try:
             partner_id = None
@@ -1169,7 +1197,7 @@ class OdooClient:
             ticket_data = {
                 'name': name,
                 'description': description,
-                'team_id': ODOO_HELPDESK_TEAM_ID,
+                'team_id': team_id or ODOO_HELPDESK_TEAM_ID,
             }
             if partner_id:
                 ticket_data['partner_id'] = partner_id
@@ -1489,10 +1517,22 @@ async def handle_webhook(request: Request):
             support_data = response.get("data", {})
             subject = support_data.get("subject", "Solicitud de soporte via WhatsApp")
             description = support_data.get("description", response_message)
+            company_name = support_data.get("company_name", "")
+            contact_name = support_data.get("contact_name", "")
+
+            # Enriquecer descripción con info de contacto
+            full_description = "TICKET DE SOPORTE VIA WHATSAPP\n\n"
+            if company_name:
+                full_description += f"Compañía: {company_name}\n"
+            if contact_name:
+                full_description += f"Contacto: {contact_name}\n"
+            full_description += f"Teléfono WhatsApp: {from_number}\n\n"
+            full_description += f"Descripción del problema:\n{description}"
+
             logger.info(f"🎫 Creando ticket de soporte: {subject}")
 
             odoo = OdooClient()
-            ticket_result = odoo.create_ticket(subject, description, from_number)
+            ticket_result = odoo.create_ticket(subject, full_description, from_number)
 
             if ticket_result["success"]:
                 ticket_id = ticket_result["ticket_id"]
@@ -1500,6 +1540,8 @@ async def handle_webhook(request: Request):
 
 ✅ *Ticket #:* {ticket_id}
 📋 *Asunto:* {subject}
+🏢 *Compañía:* {company_name}
+👤 *Contacto:* {contact_name}
 📊 *Estado:* {ticket_result.get('stage', 'Nuevo')}
 
 Nuestro equipo de atención al cliente revisará tu caso y te contactará pronto.
@@ -1508,7 +1550,43 @@ Nuestro equipo de atención al cliente revisará tu caso y te contactará pronto
             else:
                 response_message = f"❌ No pude crear el caso de soporte en este momento. Por favor intenta de nuevo o escribe a customer-care@bloomspal.odoo.com\n\nError: {ticket_result.get('error', 'desconocido')}"
 
-        # Si es una solicitud de contacto
+        
+        # Si es una confirmación de orden / oportunidad de venta
+        elif action == "order":
+            order_data = response.get("data", {})
+            company_name = order_data.get("company_name", "")
+            contact_name = order_data.get("contact_name", "")
+            quote_summary = order_data.get("quote_summary", "")
+
+            # Construir descripción con todos los detalles
+            description = "OPORTUNIDAD DE VENTA VIA WHATSAPP\n\n"
+            description += f"Compañía: {company_name}\n"
+            description += f"Contacto: {contact_name}\n"
+            description += f"Teléfono WhatsApp: {from_number}\n\n"
+            description += f"DETALLES DE COTIZACIÓN:\n{quote_summary}\n"
+
+            subject = f"Orden WhatsApp - {company_name}" if company_name else "Orden via WhatsApp"
+
+            logger.info(f"📋 Creando oportunidad de venta: {subject}")
+
+            odoo = OdooClient()
+            ticket_result = odoo.create_ticket(subject, description, from_number, team_id=ODOO_SALES_TEAM_ID)
+
+            if ticket_result["success"]:
+                ticket_id = ticket_result["ticket_id"]
+                response_message = f"""📋 *ORDEN DE ENVÍO REGISTRADA*
+
+✅ *Ticket #:* {ticket_id}
+🏢 *Compañía:* {company_name}
+👤 *Contacto:* {contact_name}
+📊 *Estado:* {ticket_result.get('stage', 'Nuevo')}
+
+Nuestro equipo de ventas revisará los detalles y te contactará para confirmar tu orden.
+
+¿Necesitas algo más?"""
+            else:
+                response_message = f"❌ No pudimos registrar tu orden. Por favor intenta de nuevo o escribe a customer-care@bloomspal.odoo.com\n\nError: {ticket_result.get('error', 'desconocido')}"
+# Si es una solicitud de contacto
         elif action == "contact":
             contact_data = response.get("data", {})
             query = contact_data.get("query", "")
