@@ -56,8 +56,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # FedEx API
 FEDEX_API_KEY = os.getenv("FEDEX_API_KEY", "l7e4ca666923294740bae8dfde52ca1f52")
 FEDEX_SECRET_KEY = os.getenv("FEDEX_SECRET_KEY", "81d7f9db60554e9b97ffa7c76075763c")
-FEDEX_ACCOUNT_USA = os.getenv("FEDEX_ACCOUNT_USA", "740561073")  # Cajas <70kg USA
-FEDEX_ACCOUNT_WORLD = os.getenv("FEDEX_ACCOUNT_WORLD", "202958384")  # Pallets/Worldwide
+FEDEX_ACCOUNT_USA = os.getenv("FEDEX_ACCOUNT_USA", "202958384")  # Andean-2 (legacy var, misma cuenta)
+FEDEX_ACCOUNT_WORLD = os.getenv("FEDEX_ACCOUNT_WORLD", "202958384")  # Andean-2
 FEDEX_BASE_URL = "https://apis.fedex.com"
 
 # Precios fijos para envíos USA <70kg
@@ -407,25 +407,22 @@ class FedExClient:
         dest_postal: str,
         dest_country: str,
         weight_kg: float,
+        packages: List[Dict] = None,
         dimensions: Dict = None,
         is_pallet: bool = False,
-        account_number: str = None
+        account_number: str = None,
+        declared_value: float = None
     ) -> Dict:
-        """Obtiene cotización de FedEx"""
+        """Obtiene cotización de FedEx con soporte para múltiples paquetes"""
 
         if not self.token:
             token = await self.get_token()
             if not token:
                 return {"error": "No se pudo autenticar con FedEx"}
 
-        # Seleccionar cuenta según tipo de envío
+        # Siempre usar cuenta Andean-2
         if account_number is None:
-            if is_pallet or dest_country != "US":
-                account_number = FEDEX_ACCOUNT_WORLD
-            elif weight_kg >= 70:
-                account_number = FEDEX_ACCOUNT_WORLD
-            else:
-                account_number = FEDEX_ACCOUNT_USA
+            account_number = FEDEX_ACCOUNT_WORLD
 
         url = f"{self.base_url}/rate/v1/rates/quotes"
         headers = {
@@ -434,12 +431,46 @@ class FedExClient:
             "X-locale": "en_US"
         }
 
-        # Convertir kg a lb (FedEx usa libras)
-        weight_lb = weight_kg * 2.20462
+        # Construir lista de paquetes
+        package_line_items = []
 
-        # Dimensiones por defecto si no se proporcionan
-        if dimensions is None:
-            dimensions = {"length": 30, "width": 30, "height": 30}
+        if packages and len(packages) > 0:
+            for pkg in packages:
+                pkg_weight_kg = pkg.get("weight_kg", weight_kg / max(len(packages), 1))
+                pkg_weight_lb = pkg_weight_kg * 2.20462
+                item = {
+                    "weight": {
+                        "units": "LB",
+                        "value": round(pkg_weight_lb, 1)
+                    }
+                }
+                pkg_length = pkg.get("length")
+                pkg_width = pkg.get("width")
+                pkg_height = pkg.get("height")
+                if pkg_length and pkg_width and pkg_height:
+                    item["dimensions"] = {
+                        "length": pkg_length,
+                        "width": pkg_width,
+                        "height": pkg_height,
+                        "units": "CM"
+                    }
+                package_line_items.append(item)
+        else:
+            weight_lb = weight_kg * 2.20462
+            item = {
+                "weight": {
+                    "units": "LB",
+                    "value": round(weight_lb, 1)
+                }
+            }
+            if dimensions:
+                item["dimensions"] = {
+                    "length": dimensions.get("length"),
+                    "width": dimensions.get("width"),
+                    "height": dimensions.get("height"),
+                    "units": "CM"
+                }
+            package_line_items.append(item)
 
         payload = {
             "accountNumber": {"value": account_number},
@@ -456,34 +487,44 @@ class FedExClient:
                         "countryCode": dest_country
                     }
                 },
-                "pickupType": "DROPOFF_AT_FEDEX_LOCATION",
+                "pickupType": "CONTACT_FEDEX_TO_SCHEDULE",
                 "rateRequestType": ["ACCOUNT", "LIST"],
-                "requestedPackageLineItems": [{
-                    "weight": {
-                        "units": "LB",
-                        "value": weight_lb
-                    },
-                    "dimensions": {
-                        "length": dimensions.get("length", 30),
-                        "width": dimensions.get("width", 30),
-                        "height": dimensions.get("height", 30),
-                        "units": "CM"
-                    }
-                }]
+                "packageCount": len(package_line_items),
+                "requestedPackageLineItems": package_line_items
             }
         }
 
+        if declared_value and declared_value > 0:
+            payload["requestedShipment"]["customsClearanceDetail"] = {
+                "dutiesPayment": {
+                    "paymentType": "SENDER"
+                },
+                "commodities": [{
+                    "description": "General Merchandise",
+                    "quantity": len(package_line_items),
+                    "quantityUnits": "PCS",
+                    "weight": {
+                        "units": "LB",
+                        "value": round(weight_kg * 2.20462, 1)
+                    },
+                    "customsValue": {
+                        "amount": declared_value,
+                        "currency": "USD"
+                    }
+                }]
+            }
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
+                logger.info(f"📦 FedEx request: {len(package_line_items)} paquete(s), pickup=CONTACT_FEDEX_TO_SCHEDULE, declared_value={declared_value}")
                 response = await client.post(url, headers=headers, json=payload)
 
                 if response.status_code != 200:
                     logger.error(f"❌ FedEx Rate error: {response.status_code} - {response.text}")
-                    # Si es error de auth, intentar renovar token
                     if response.status_code == 401:
                         logger.info("🔄 Renovando token FedEx...")
                         await self.get_token()
-                    return {"error": f"FedEx API error: {response.status_code}"}
+                    return {"error": f"FedEx API error: {response.status_code}", "details": response.text[:500]}
 
                 return response.json()
         except Exception as e:
@@ -501,27 +542,31 @@ class SonIAProcessor:
     SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de cotizaciones de BloomsPal/Andean Fields.
 Tu trabajo es ayudar a los clientes a obtener cotizaciones de envío FedEx.
 
-INFORMACIÓN QUE NECESITAS EXTRAER:
-1. País de destino
-2. Ciudad de destino
-3. Código postal de destino
-4. Peso total en kg
-5. ¿Es paletizado? (sí/no)
-6. Número de cajas (si aplica)
-7. Dimensiones (largo x ancho x alto en cm)
-8. Valor declarado (opcional)
+INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
+1. País de ORIGEN del envío
+2. Ciudad de ORIGEN del envío
+3. Código postal de ORIGEN
+4. País de DESTINO
+5. Ciudad de DESTINO
+6. Código postal de DESTINO
+7. Peso total en kg
+8. ¿Es paletizado? (sí/no)
+9. Número de cajas/paquetes (SIEMPRE preguntar cuántos)
+10. Dimensiones de CADA paquete o pallet (largo x ancho x alto en cm) - OBLIGATORIO, no asumir valores
+11. Valor declarado de la mercancía en USD - OBLIGATORIO, siempre preguntar
 
 REGLAS DE PRECIOS:
-- Cajas sueltas < 70kg a USA: $5 USD/kg + $8 USD por dirección (precio fijo, no necesita cotizar FedEx)
+- Cajas sueltas < 70kg desde Colombia a USA: $5 USD/kg + $8 USD por dirección (precio fijo, no necesita cotizar FedEx)
 - Pallets a cualquier destino: Cotizar con FedEx API
 - Cajas sueltas ≥ 70kg a USA: Cotizar con FedEx API
 - Cualquier envío fuera de USA: Cotizar con FedEx API
+- SIEMPRE cotizar la opción más económica disponible
 
 COMPORTAMIENTO:
 1. Saluda amablemente y pregunta cómo puedes ayudar
 2. Extrae la información del mensaje del cliente
-3. Si falta información crítica (destino, peso), pregunta educadamente
-4. Cuando tengas toda la información, genera la cotización
+3. Si falta CUALQUIER información de la lista de arriba, pregunta educadamente. NO asumas valores por defecto para dimensiones ni valor declarado.
+4. Cuando tengas TODA la información, genera la cotización
 5. Presenta la cotización de forma profesional y clara
 
 FORMATO DE RESPUESTA PARA COTIZACIÓN:
@@ -529,22 +574,35 @@ Cuando tengas toda la información, responde con un JSON estructurado así:
 {
     "action": "quote",
     "data": {
+        "origin_country": "CO",
+        "origin_city": "Bogota",
+        "origin_postal": "110111",
         "destination_country": "US",
         "destination_city": "Miami",
         "destination_postal": "33101",
         "weight_kg": 25,
         "is_pallet": false,
-        "num_boxes": 5,
-        "dimensions": {"length": 40, "width": 30, "height": 30},
-        "declared_value": 500
+        "num_boxes": 3,
+        "packages": [
+            {"weight_kg": 10, "length": 40, "width": 30, "height": 30},
+            {"weight_kg": 8, "length": 35, "width": 25, "height": 25},
+            {"weight_kg": 7, "length": 30, "width": 20, "height": 20}
+        ],
+        "declared_value": 1500
     },
     "message": "Mensaje amigable para el cliente"
 }
 
+NOTA SOBRE PAQUETES:
+- Si el cliente dice que tiene múltiples cajas/paquetes, pregunta las dimensiones y peso de CADA uno
+- Si todos los paquetes son iguales, puedes usar la misma dimensión para todos
+- El campo "packages" es una lista con cada paquete individual
+- Si solo hay 1 paquete, la lista tiene un solo elemento
+
 Si necesitas más información:
 {
     "action": "ask",
-    "missing": ["postal_code", "weight"],
+    "missing": ["origin_postal", "dimensions", "declared_value"],
     "message": "Tu mensaje preguntando por la información faltante"
 }
 
@@ -557,7 +615,7 @@ Si es una conversación general:
 IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JSON.
 
 Siempre responde en español, de forma amigable y profesional.
-Origen de envíos: Bogotá, Colombia, CP 110111 (Oficina Andean Fields)"""
+Empresa: BloomsPal / Andean Fields (CI ANDEAN FIELDS)"""
 
     def __init__(self):
         # CORREGIDO: Usar cliente ASÍNCRONO en vez de síncrono
@@ -683,9 +741,13 @@ class QuoteCalculator:
         """Calcula la cotización según las reglas de negocio"""
 
         dest_country = quote_data.get("destination_country", "").upper()
+        origin_country = quote_data.get("origin_country", "CO").upper()
+        origin_postal = quote_data.get("origin_postal", "110111")
         weight_kg = quote_data.get("weight_kg", 0)
         is_pallet = quote_data.get("is_pallet", False)
         num_boxes = quote_data.get("num_boxes", 1)
+        packages = quote_data.get("packages", [])
+        declared_value = quote_data.get("declared_value", 0)
 
         result = {
             "success": True,
@@ -693,51 +755,79 @@ class QuoteCalculator:
             "amount": 0,
             "currency": "USD",
             "details": "",
-            "fedex_account_used": ""
+            "fedex_account_used": "",
+            "all_services": []
         }
 
-        # Regla 1: Cajas sueltas < 70kg a USA = precio fijo
-        if dest_country == "US" and not is_pallet and weight_kg < 70:
+        # Regla 1: Cajas sueltas < 70kg desde Colombia a USA = precio fijo
+        if dest_country == "US" and origin_country == "CO" and not is_pallet and weight_kg < 70:
             total = (weight_kg * PRECIO_POR_KG_USA) + PRECIO_POR_DIRECCION
             result["quote_type"] = "fixed_rate"
             result["amount"] = round(total, 2)
-            result["fedex_account_used"] = FEDEX_ACCOUNT_USA
-            result["details"] = f"Precio fijo: ${PRECIO_POR_KG_USA}/kg × {weight_kg}kg + ${PRECIO_POR_DIRECCION} por dirección"
+            result["fedex_account_used"] = FEDEX_ACCOUNT_WORLD
+            result["details"] = f"Precio fijo: ${PRECIO_POR_KG_USA}/kg x {weight_kg}kg + ${PRECIO_POR_DIRECCION} por dirección"
             return result
 
         # Regla 2: Todo lo demás = cotizar con FedEx API
         try:
             fedex_response = await self.fedex.get_rate_quote(
-                origin_postal="110111",
-                origin_country="CO",
+                origin_postal=origin_postal,
+                origin_country=origin_country,
                 dest_postal=quote_data.get("destination_postal", ""),
                 dest_country=dest_country,
                 weight_kg=weight_kg,
+                packages=packages,
                 dimensions=quote_data.get("dimensions"),
-                is_pallet=is_pallet
+                is_pallet=is_pallet,
+                declared_value=declared_value
             )
 
-            # Extraer el precio de la respuesta de FedEx
             if "output" in fedex_response:
                 rate_details = fedex_response["output"].get("rateReplyDetails", [])
                 if rate_details:
-                    # Buscar la tarifa más económica
-                    best_rate = None
+                    all_services = []
                     for rate in rate_details:
                         rated_shipment = rate.get("ratedShipmentDetails", [{}])[0]
                         total_charge = rated_shipment.get("totalNetCharge", 0)
-                        if best_rate is None or total_charge < best_rate:
-                            best_rate = total_charge
-                            result["service_type"] = rate.get("serviceType", "")
+                        service_type = rate.get("serviceType", "")
+                        service_name = rate.get("serviceName", service_type)
+                        transit_days = rate.get("commit", {}).get("transitDays", {})
+                        if isinstance(transit_days, dict):
+                            transit_days = transit_days.get("description", "N/A")
 
-                    if best_rate:
+                        all_services.append({
+                            "service_type": service_type,
+                            "service_name": service_name,
+                            "total_charge": round(float(total_charge), 2),
+                            "transit_days": str(transit_days)
+                        })
+
+                    all_services.sort(key=lambda x: x["total_charge"])
+                    result["all_services"] = all_services
+
+                    if all_services:
+                        cheapest = all_services[0]
                         result["quote_type"] = "fedex_api"
-                        result["amount"] = round(float(best_rate), 2)
-                        result["fedex_account_used"] = FEDEX_ACCOUNT_WORLD if (is_pallet or dest_country != "US" or weight_kg >= 70) else FEDEX_ACCOUNT_USA
-                        result["details"] = f"Cotización FedEx - Servicio: {result.get('service_type', 'Standard')}"
+                        result["amount"] = cheapest["total_charge"]
+                        result["service_type"] = cheapest["service_type"]
+                        result["service_name"] = cheapest["service_name"]
+                        result["transit_days"] = cheapest["transit_days"]
+                        result["fedex_account_used"] = FEDEX_ACCOUNT_WORLD
+                        result["details"] = f"Servicio: {cheapest['service_name']} ({cheapest['transit_days']} días)"
+
+                        logger.info(f"📊 Servicios FedEx disponibles ({len(all_services)}):")
+                        for svc in all_services:
+                            logger.info(f"   - {svc['service_name']}: ${svc['total_charge']} ({svc['transit_days']} días)")
+
                         return result
 
-            # Si no se pudo obtener cotización
+            error_msg = fedex_response.get("error", "")
+            error_details = fedex_response.get("details", "")
+            if error_msg:
+                result["success"] = False
+                result["details"] = f"Error FedEx: {error_msg}. {error_details}"
+                return result
+
             result["success"] = False
             result["details"] = "No se pudo obtener cotización de FedEx. Por favor contacte a soporte."
 
@@ -928,17 +1018,34 @@ async def handle_webhook(request: Request):
 
             if quote_result["success"]:
                 # Formatear mensaje de cotización
+                origin_info = f"{quote_data.get('origin_city', 'Origen')}, {quote_data.get('origin_country', '')}"
+                dest_info = f"{quote_data.get('destination_city', 'Destino')}, {quote_data.get('destination_country', '')}"
+                num_pkgs = len(quote_data.get('packages', [])) or quote_data.get('num_boxes', 1)
+                declared_val = quote_data.get('declared_value', 0)
+
                 response_message = f"""✅ *COTIZACIÓN SonIA*
 
-📍 *Destino:* {quote_data.get('destination_city', '')}, {quote_data.get('destination_country', '')}
-📦 *Peso:* {quote_data.get('weight_kg', 0)} kg
-{'🎁 *Paletizado:* Sí' if quote_data.get('is_pallet') else '📦 *Cajas:* ' + str(quote_data.get('num_boxes', 1))}
+📤 *Origen:* {origin_info} (CP {quote_data.get('origin_postal', '')})
+📍 *Destino:* {dest_info} (CP {quote_data.get('destination_postal', '')})
+📦 *Peso total:* {quote_data.get('weight_kg', 0)} kg
+{'🎁 *Paletizado:* Sí' if quote_data.get('is_pallet') else f'📦 *Paquetes:* {num_pkgs}'}
+💎 *Valor declarado:* ${declared_val:,.2f} USD
+🚛 *Recogida:* FedEx recoge en dirección de origen
 
-💰 *PRECIO: ${quote_result['amount']:.2f} USD*
+💰 *PRECIO MÁS ECONÓMICO: ${quote_result['amount']:.2f} USD*
+🏷️ *Servicio:* {quote_result.get('service_name', quote_result.get('service_type', 'FedEx'))}
+📅 *Tiempo estimado:* {quote_result.get('transit_days', 'N/A')} días
 
-📝 {quote_result['details']}
+📝 {quote_result['details']}"""
 
-¿Deseas proceder con este envío? Responde *SÍ* para confirmar o escríbeme si necesitas otra cotización."""
+                # Agregar otros servicios disponibles si hay más de uno
+                all_services = quote_result.get("all_services", [])
+                if len(all_services) > 1:
+                    response_message += "\n\n📋 *Otros servicios disponibles:*"
+                    for svc in all_services[1:4]:
+                        response_message += f"\n  • {svc['service_name']}: ${svc['total_charge']:.2f} USD ({svc['transit_days']} días)"
+
+                response_message += "\n\n¿Deseas proceder con este envío? Responde *SÍ* para confirmar o escríbeme si necesitas otra cotización."
 
                 # Guardar cotización
                 quote_data["quote_amount"] = quote_result["amount"]
