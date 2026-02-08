@@ -1751,7 +1751,7 @@ async def handle_webhook(request: Request):
             else:
                 user_context = f"CONTEXTO USUARIO: Cliente registrado. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: {user_data.get('cliente', 'No especificada')}."
         else:
-            user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. Debes recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, usa action 'register_user'."
+            user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. IMPORTANTE: NO proceses cotizaciones, tracking, tickets ni ninguna otra función hasta que el usuario se registre. Tu ÚNICA tarea ahora es recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, usa action 'register_user'."
 
 # Procesar con Claude
         logger.info("🤖 Procesando con Claude AI...")
@@ -1760,6 +1760,12 @@ async def handle_webhook(request: Request):
         action = response.get("action", "chat")
         response_message = response.get("message", "")
         logger.info(f"🤖 Claude action={action}, mensaje={response_message[:80]}...")
+
+        # ===== GATE: Usuario no registrado no puede usar funciones =====
+        if not user_data and action not in ("register_user", "chat"):
+            logger.info(f"🚫 Acción '{action}' bloqueada - usuario no registrado")
+            response_message = "Antes de poder ayudarte con eso, necesito conocerte un poco. ¿Podrías decirme tu nombre completo y a qué empresa perteneces?"
+            action = "chat"
 
         # Si es una solicitud de cotización
         if action == "quote":
@@ -1945,8 +1951,19 @@ Nuestro equipo de ventas revisará los detalles y te contactará para confirmar 
             if user_data:
                 try:
                     odoo_emp = OdooClient()
-                    if user_data.get('row', 0) > 0:
-                        odoo_emp.update_spreadsheet_cell(user_data['row'], 4, "empleado")
+                    row_to_update = user_data.get('row', 0)
+                    logger.info(f"👔 claim_employee: row={row_to_update}, phone={from_number}")
+                    if row_to_update == 0:
+                        found = odoo_emp.find_user_by_phone(from_number)
+                        if found:
+                            row_to_update = found.get('row', 0)
+                            user_data['row'] = row_to_update
+                            logger.info(f"👔 Row encontrado via lookup: {row_to_update}")
+                    if row_to_update > 0:
+                        success = odoo_emp.update_spreadsheet_cell(row_to_update, 4, "empleado")
+                        logger.info(f"📝 Spreadsheet ROL update fila {row_to_update}: {'OK' if success else 'FAIL'}")
+                    else:
+                        logger.warning(f"⚠️ No se pudo encontrar fila en spreadsheet para {from_number}")
                 except Exception as e:
                     logger.error(f"❌ Error actualizando rol en spreadsheet: {e}")
                 user_data['rol'] = 'empleado'
