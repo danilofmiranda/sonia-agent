@@ -28,6 +28,7 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 import anthropic
+import xmlrpc.client
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -65,6 +66,13 @@ FEDEX_BASE_URL = "https://apis.fedex.com"
 # Precios fijos para envíos USA <70kg
 PRECIO_POR_KG_USA = 5.0  # USD por kg
 PRECIO_POR_DIRECCION = 8.0  # USD por dirección
+
+# Odoo API
+ODOO_URL = os.getenv("ODOO_URL", "https://bloomspal.odoo.com")
+ODOO_DB = os.getenv("ODOO_DB", "bloomspal")
+ODOO_USER = os.getenv("ODOO_USER", "danilo@bloomspal.com")
+ODOO_API_KEY = os.getenv("ODOO_API_KEY", "")
+ODOO_HELPDESK_TEAM_ID = int(os.getenv("ODOO_HELPDESK_TEAM_ID", "1"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VALIDACIÓN DE VARIABLES CRÍTICAS AL INICIAR
@@ -732,6 +740,36 @@ IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JS
 Siempre responde en español, de forma amigable y profesional.
 IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico al cliente. Siempre habla de "BloomsPal Logistics" como el servicio de envío. No reveles nombres de transportistas.
 
+
+SOPORTE Y CONTACTO (ODOO):
+Si el cliente necesita:
+1. Crear un caso de soporte/queja/reclamo:
+{
+    "action": "support",
+    "data": {
+        "subject": "Resumen breve del problema",
+        "description": "Descripción detallada del problema o solicitud del cliente"
+    },
+    "message": "Voy a crear un caso de soporte para ti..."
+}
+
+2. Buscar un contacto de BloomsPal o preguntar por alguien:
+{
+    "action": "contact",
+    "data": {
+        "query": "nombre o término de búsqueda"
+    },
+    "message": "Buscando la información de contacto..."
+}
+
+CÓMO DETECTAR SOLICITUDES DE SOPORTE:
+- Palabras: "queja", "reclamo", "problema", "soporte", "ayuda con mi envío", "daño", "pérdida", "retraso", "caso", "ticket"
+- Siempre pregunta detalles del problema antes de crear el ticket
+
+CÓMO DETECTAR SOLICITUDES DE CONTACTO:
+- Palabras: "contactar", "hablar con", "teléfono de", "email de", "quién maneja", "responsable de"
+- Si piden hablar con alguien específico, busca el contacto
+
 Empresa: BloomsPal Logistics"""
 
     def __init__(self):
@@ -1075,6 +1113,125 @@ class TrackingProcessor:
             return {"success": False, "error": f"Error procesando información: {str(e)}"}
 
 
+
+
+class OdooClient:
+    """Cliente para interactuar con Odoo via XML-RPC"""
+
+    def __init__(self):
+        self.url = ODOO_URL
+        self.db = ODOO_DB
+        self.username = ODOO_USER
+        self.api_key = ODOO_API_KEY
+        self.uid = None
+        self.models = None
+
+    def _connect(self):
+        """Establece conexión con Odoo"""
+        if self.uid and self.models:
+            return True
+        try:
+            if not self.api_key:
+                logger.warning("⚠️ ODOO_API_KEY no configurada - integración Odoo deshabilitada")
+                return False
+            common = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common")
+            self.uid = common.authenticate(self.db, self.username, self.api_key, {})
+            if not self.uid:
+                logger.error("❌ Autenticación Odoo fallida")
+                return False
+            self.models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object")
+            logger.info(f"✅ Conectado a Odoo como uid={self.uid}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error conectando a Odoo: {e}")
+            return False
+
+    def _execute(self, model, method, *args, **kwargs):
+        """Ejecuta operación en Odoo"""
+        if not self._connect():
+            return None
+        try:
+            return self.models.execute_kw(
+                self.db, self.uid, self.api_key,
+                model, method, *args, **kwargs
+            )
+        except Exception as e:
+            logger.error(f"❌ Error Odoo {model}.{method}: {e}")
+            return None
+
+    def create_ticket(self, name: str, description: str, phone: str = None) -> Dict:
+        """Crea un ticket de soporte en Odoo Helpdesk"""
+        try:
+            partner_id = None
+            if phone:
+                partner_id = self._find_or_create_partner(phone)
+
+            ticket_data = {
+                'name': name,
+                'description': description,
+                'team_id': ODOO_HELPDESK_TEAM_ID,
+            }
+            if partner_id:
+                ticket_data['partner_id'] = partner_id
+
+            ticket_id = self._execute('helpdesk.ticket', 'create', [ticket_data])
+            if ticket_id:
+                ticket_info = self._execute('helpdesk.ticket', 'read', [ticket_id], {'fields': ['id', 'name', 'stage_id']})
+                stage = ticket_info[0]['stage_id'][1] if ticket_info and ticket_info[0].get('stage_id') else 'Nuevo'
+                logger.info(f"🎫 Ticket creado en Odoo: ID={ticket_id}")
+                return {"success": True, "ticket_id": ticket_id, "stage": stage}
+            return {"success": False, "error": "No se pudo crear el ticket"}
+        except Exception as e:
+            logger.error(f"❌ Error creando ticket Odoo: {e}")
+            return {"success": False, "error": str(e)}
+
+    def search_contacts(self, query: str) -> Dict:
+        """Busca contactos en Odoo"""
+        try:
+            domain = ['|', '|',
+                ['name', 'ilike', query],
+                ['email', 'ilike', query],
+                ['phone', 'ilike', query]
+            ]
+            contacts = self._execute('res.partner', 'search_read',
+                [domain],
+                {'fields': ['name', 'email', 'phone', 'mobile', 'function', 'city', 'is_company'], 'limit': 5}
+            )
+            if contacts:
+                logger.info(f"🔍 Encontrados {len(contacts)} contactos para '{query}'")
+                return {"success": True, "contacts": contacts}
+            return {"success": True, "contacts": []}
+        except Exception as e:
+            logger.error(f"❌ Error buscando contactos: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _find_or_create_partner(self, phone: str) -> int:
+        """Busca un contacto por teléfono, o crea uno nuevo"""
+        try:
+            clean_phone = phone.strip().replace(" ", "")
+            if not clean_phone.startswith("+"):
+                clean_phone = "+" + clean_phone
+
+            partners = self._execute('res.partner', 'search',
+                [['|', ['phone', 'like', clean_phone[-10:]], ['mobile', 'like', clean_phone[-10:]]]],
+                {'limit': 1}
+            )
+            if partners:
+                return partners[0]
+
+            new_partner = self._execute('res.partner', 'create', [{
+                'name': f'WhatsApp {clean_phone}',
+                'phone': clean_phone,
+                'comment': 'Contacto creado automáticamente por SonIA WhatsApp Agent'
+            }])
+            if new_partner:
+                logger.info(f"👤 Nuevo contacto creado en Odoo: ID={new_partner}")
+            return new_partner
+        except Exception as e:
+            logger.error(f"❌ Error buscando/creando partner: {e}")
+            return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # APLICACIÓN FASTAPI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1325,6 +1482,67 @@ async def handle_webhook(request: Request):
             else:
                 error_msg = track_result.get("error", "Error desconocido")
                 response_message = f"❌ {error_msg}\n\nPor favor verifica el número de rastreo e intenta de nuevo, o escríbeme si necesitas ayuda."
+
+
+        # Si es una solicitud de soporte
+        elif action == "support":
+            support_data = response.get("data", {})
+            subject = support_data.get("subject", "Solicitud de soporte via WhatsApp")
+            description = support_data.get("description", response_message)
+            logger.info(f"🎫 Creando ticket de soporte: {subject}")
+
+            odoo = OdooClient()
+            ticket_result = odoo.create_ticket(subject, description, from_number)
+
+            if ticket_result["success"]:
+                ticket_id = ticket_result["ticket_id"]
+                response_message = f"""🎫 *CASO DE SOPORTE CREADO*
+
+✅ *Ticket #:* {ticket_id}
+📋 *Asunto:* {subject}
+📊 *Estado:* {ticket_result.get('stage', 'Nuevo')}
+
+Nuestro equipo de atención al cliente revisará tu caso y te contactará pronto.
+
+¿Necesitas algo más?"""
+            else:
+                response_message = f"❌ No pude crear el caso de soporte en este momento. Por favor intenta de nuevo o escribe a customer-care@bloomspal.odoo.com\n\nError: {ticket_result.get('error', 'desconocido')}"
+
+        # Si es una solicitud de contacto
+        elif action == "contact":
+            contact_data = response.get("data", {})
+            query = contact_data.get("query", "")
+            logger.info(f"🔍 Buscando contacto: {query}")
+
+            odoo = OdooClient()
+            contact_result = odoo.search_contacts(query)
+
+            if contact_result["success"] and contact_result["contacts"]:
+                contacts = contact_result["contacts"]
+                response_message = f"📇 *CONTACTOS ENCONTRADOS* ({len(contacts)}):\n"
+                for c in contacts:
+                    name = c.get('name', 'N/A')
+                    function = c.get('function', '')
+                    email = c.get('email', '')
+                    phone = c.get('phone', '') or c.get('mobile', '')
+                    city = c.get('city', '')
+
+                    response_message += f"\n👤 *{name}*"
+                    if function:
+                        response_message += f"\n   🏢 {function}"
+                    if email:
+                        response_message += f"\n   📧 {email}"
+                    if phone:
+                        response_message += f"\n   📲 {phone}"
+                    if city:
+                        response_message += f"\n   📍 {city}"
+                    response_message += "\n"
+
+                response_message += "\n¿Necesitas algo más?"
+            elif contact_result["success"]:
+                response_message = f"No encontré contactos que coincidan con '{query}'. ¿Puedes darme más detalles de a quién buscas?"
+            else:
+                response_message = f"❌ No pude buscar contactos en este momento. Por favor intenta de nuevo más tarde."
 
         # Validar que hay mensaje para enviar
         if not response_message:
