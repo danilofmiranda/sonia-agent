@@ -411,7 +411,8 @@ class FedExClient:
         dimensions: Dict = None,
         is_pallet: bool = False,
         account_number: str = None,
-        declared_value: float = None
+        declared_value: float = None,
+        shipping_date: str = None
     ) -> Dict:
         """Obtiene cotización de FedEx con soporte para múltiples paquetes"""
 
@@ -491,7 +492,8 @@ class FedExClient:
                 "rateRequestType": ["ACCOUNT", "LIST"],
                 "preferredCurrency": "USD",
                 "packageCount": len(package_line_items),
-                "requestedPackageLineItems": package_line_items
+                "requestedPackageLineItems": package_line_items,
+                "shipDateStamp": shipping_date or datetime.now().strftime("%Y-%m-%d")
             }
         }
 
@@ -555,6 +557,7 @@ INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
 9. Número de cajas/paquetes (SIEMPRE preguntar cuántos)
 10. Dimensiones de CADA paquete o pallet (largo x ancho x alto en cm) - OBLIGATORIO, no asumir valores
 11. Valor declarado de la mercancía en USD - OBLIGATORIO, siempre preguntar
+12. Fecha de salida / shipping date (formato YYYY-MM-DD) - OBLIGATORIO, siempre preguntar cuándo desea despachar
 
 REGLAS DE PRECIOS:
 - Cajas sueltas < 70kg desde Colombia a USA: $5 USD/kg + $8 USD por dirección (precio fijo)
@@ -589,7 +592,8 @@ Cuando tengas toda la información, responde con un JSON estructurado así:
             {"weight_kg": 8, "length": 35, "width": 25, "height": 25},
             {"weight_kg": 7, "length": 30, "width": 20, "height": 20}
         ],
-        "declared_value": 1500
+        "declared_value": 1500,
+        "shipping_date": "2026-02-15"
     },
     "message": "Mensaje amigable para el cliente"
 }
@@ -603,7 +607,7 @@ NOTA SOBRE PAQUETES:
 Si necesitas más información:
 {
     "action": "ask",
-    "missing": ["origin_postal", "dimensions", "declared_value"],
+    "missing": ["origin_postal", "dimensions", "declared_value", "shipping_date"],
     "message": "Tu mensaje preguntando por la información faltante"
 }
 
@@ -751,6 +755,7 @@ class QuoteCalculator:
         num_boxes = quote_data.get("num_boxes", 1)
         packages = quote_data.get("packages", [])
         declared_value = quote_data.get("declared_value", 0)
+        shipping_date = quote_data.get("shipping_date")
 
         result = {
             "success": True,
@@ -782,7 +787,8 @@ class QuoteCalculator:
                 packages=packages,
                 dimensions=quote_data.get("dimensions"),
                 is_pallet=is_pallet,
-                declared_value=declared_value
+                declared_value=declared_value,
+                shipping_date=shipping_date
             )
 
             # Extraer el precio de la respuesta de FedEx
@@ -802,9 +808,21 @@ class QuoteCalculator:
                         response_currency = rated_shipment.get("currency", "USD")
                         service_type = rate.get("serviceType", "")
                         service_name = rate.get("serviceName", service_type)
-                        transit_days = rate.get("commit", {}).get("transitDays", {})
-                        if isinstance(transit_days, dict):
-                            transit_days = transit_days.get("description", "N/A")
+                        # Intentar múltiples paths para transit days según versión de FedEx API
+                        commit_obj = rate.get("commit", {})
+                        logger.info(f"🔍 FedEx commit object for {service_type}: {commit_obj}")
+                        transit_days = "N/A"
+                        if commit_obj:
+                            # Path 1: commit.dateDetail.dayCount (FedEx Rate API v1)
+                            date_detail = commit_obj.get("dateDetail", {})
+                            if date_detail and date_detail.get("dayCount"):
+                                transit_days = str(date_detail.get("dayCount"))
+                            # Path 2: commit.transitDays (string directo)
+                            elif commit_obj.get("transitDays") and not isinstance(commit_obj.get("transitDays"), dict):
+                                transit_days = str(commit_obj.get("transitDays"))
+                            # Path 3: operationalDetail.transitDays
+                            elif rate.get("operationalDetail", {}).get("transitDays"):
+                                transit_days = str(rate["operationalDetail"]["transitDays"])
 
                         charge_float = round(float(total_charge), 2)
 
@@ -836,7 +854,7 @@ class QuoteCalculator:
                         result["service_name"] = cheapest["service_name"]
                         result["transit_days"] = cheapest["transit_days"]
                         result["fedex_account_used"] = FEDEX_ACCOUNT_WORLD
-                        result["details"] = f"Servicio: {cheapest['service_name']} ({cheapest['transit_days']} días)"
+                        result["details"] = f"Opción más económica ({cheapest['transit_days']} días)"
 
                         logger.info(f"📊 Servicios FedEx disponibles ({len(all_services)}):")
                         for svc in all_services:
@@ -1054,6 +1072,7 @@ async def handle_webhook(request: Request):
 {'🎁 *Paletizado:* Sí' if quote_data.get('is_pallet') else f'📦 *Paquetes:* {num_pkgs}'}
 💎 *Valor declarado:* ${declared_val:,.2f} USD
 🚛 *Recogida:* En dirección de origen
+📆 *Fecha de salida:* {quote_data.get('shipping_date', 'Por confirmar')}
 
 💰 *PRECIO MÁS ECONÓMICO: ${quote_result['amount']:.2f} USD*
 🏷️ *Servicio:* {'BloomsPal Logistics'}
