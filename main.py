@@ -29,6 +29,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 import anthropic
 import xmlrpc.client
+import uuid
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -74,6 +75,7 @@ ODOO_USER = os.getenv("ODOO_USER", "danilo@bloomspal.com")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "")
 ODOO_HELPDESK_TEAM_ID = int(os.getenv("ODOO_HELPDESK_TEAM_ID", "1"))
 ODOO_SALES_TEAM_ID = int(os.getenv("ODOO_SALES_TEAM_ID", "7"))
+ODOO_SPREADSHEET_ID = int(os.getenv("ODOO_SPREADSHEET_ID", "114"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VALIDACIÓN DE VARIABLES CRÍTICAS AL INICIAR
@@ -156,6 +158,21 @@ def init_database():
         )
     """)
 
+
+    # Tabla de usuarios WhatsApp
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS whatsapp_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT UNIQUE NOT NULL,
+            cliente TEXT DEFAULT '',
+            nombre TEXT DEFAULT '',
+            nickname TEXT DEFAULT '',
+            rol TEXT DEFAULT 'cliente',
+            spreadsheet_row INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -798,13 +815,45 @@ CÓMO DETECTAR SOLICITUDES DE CONTACTO:
 - Palabras: "contactar", "hablar con", "teléfono de", "email de", "quién maneja", "responsable de"
 - Si piden hablar con alguien específico, busca el contacto
 
+
+IDENTIFICACIÓN DE USUARIO:
+Al inicio de cada conversación se te proporcionará un CONTEXTO USUARIO con información del usuario.
+
+Si el usuario es NUEVO (no registrado):
+- Preséntate como SonIA de BloomsPal Logistics
+- Pregúntale su nombre completo y a qué empresa pertenece
+- Pregúntale: "¿Hay algún nombre o apodo por el que prefieras que te llame?"
+- Si no quiere nickname, déjalo vacío
+- Cuando tengas nombre y empresa (nickname es opcional), responde con:
+{
+    "action": "register_user",
+    "data": {
+        "nombre": "Nombre Completo",
+        "cliente": "Nombre Empresa",
+        "nickname": "apodo o vacío si no dio"
+    },
+    "message": "Tu mensaje amigable confirmando registro y preguntando en qué ayudar"
+}
+
+Si un usuario REGISTRADO dice "soy empleado", "trabajo en BloomsPal", "soy de BloomsPal" o similar:
+{
+    "action": "claim_employee",
+    "message": "Mensaje confirmando que se registró como empleado"
+}
+
+REGLAS DE NOMBRE:
+- Si el contexto incluye un nombre/nickname, SIEMPRE úsalo para personalizar tus respuestas
+- Sé amigable y cercana, como una amiga que ayuda
+- NUNCA preguntes a un cliente si es empleado. Solo el usuario puede decirte que es empleado
+- Si el usuario ya está registrado, NO vuelvas a pedir su nombre
+
 Empresa: BloomsPal Logistics"""
 
     def __init__(self):
         # CORREGIDO: Usar cliente ASÍNCRONO en vez de síncrono
         self.client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-    async def process_text(self, text: str, conversation_history: List[Dict] = None) -> Dict:
+    async def process_text(self, text: str, conversation_history: List[Dict] = None, user_context: str = "") -> Dict:
         """Procesa un mensaje de texto con Claude AI"""
         messages = []
 
@@ -824,7 +873,7 @@ Empresa: BloomsPal Logistics"""
             response = await self.client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1024,
-                system=self.SYSTEM_PROMPT,
+                system=(user_context + "\n\n" + self.SYSTEM_PROMPT) if user_context else self.SYSTEM_PROMPT,
                 messages=messages
             )
 
@@ -1260,8 +1309,207 @@ class OdooClient:
             return None
 
 
+    def read_spreadsheet_users(self) -> List[Dict]:
+        """Lee todos los usuarios de la hoja WHATSAPP BBDD"""
+        try:
+            result = self._execute('documents.document', 'read',
+                                   [[ODOO_SPREADSHEET_ID], ['spreadsheet_snapshot']])
+            if not result:
+                return []
+            snapshot_b64 = result[0].get('spreadsheet_snapshot')
+            if not snapshot_b64:
+                return []
+            snapshot_json = base64.b64decode(snapshot_b64).decode('utf-8')
+            snapshot = json.loads(snapshot_json)
+            cells = snapshot.get('sheets', [{}])[0].get('cells', {})
+            users = []
+            row = 2
+            while row < 500:
+                a = cells.get(f"A{row}", "")
+                b = cells.get(f"B{row}", "")
+                d = cells.get(f"D{row}", "")
+                if not a and not b and not d:
+                    break
+                users.append({
+                    'cliente': a, 'nombre': b,
+                    'nickname': cells.get(f"C{row}", ""),
+                    'whatsapp': d,
+                    'rol': cells.get(f"E{row}", ""),
+                    'clave': cells.get(f"F{row}", ""),
+                    'row': row
+                })
+                row += 1
+            return users
+        except Exception as e:
+            logger.error(f"❌ Error leyendo spreadsheet usuarios: {e}")
+            return []
+
+    def find_user_by_phone(self, phone: str) -> Optional[Dict]:
+        """Busca usuario por número de WhatsApp en la hoja"""
+        users = self.read_spreadsheet_users()
+        clean = phone.strip().replace("+", "").replace(" ", "")
+        for u in users:
+            up = u['whatsapp'].strip().replace("+", "").replace(" ", "")
+            if not up:
+                continue
+            if up == clean or clean[-10:] == up[-10:]:
+                return u
+        return None
+
+    def _get_spreadsheet_rev_id(self) -> Optional[str]:
+        """Obtiene el revisionId actual del spreadsheet"""
+        try:
+            result = self._execute('documents.document', 'read',
+                                   [[ODOO_SPREADSHEET_ID], ['spreadsheet_snapshot']])
+            if result:
+                snapshot = json.loads(base64.b64decode(result[0]['spreadsheet_snapshot']).decode('utf-8'))
+                return snapshot.get('revisionId')
+        except Exception:
+            pass
+        return None
+
+    def _dispatch_spreadsheet_cmd(self, commands: list) -> bool:
+        """Envía comandos al spreadsheet de Odoo"""
+        try:
+            rev_id = self._get_spreadsheet_rev_id()
+            if not rev_id:
+                return False
+            message = {
+                "type": "REMOTE_REVISION",
+                "nextRevisionId": str(uuid.uuid4()),
+                "serverRevisionId": rev_id,
+                "commands": commands,
+                "clientId": "sonia-bot"
+            }
+            result = self._execute('documents.document', 'dispatch_spreadsheet_message',
+                                   [[ODOO_SPREADSHEET_ID], message])
+            return bool(result)
+        except Exception as e:
+            logger.error(f"❌ Error dispatch spreadsheet: {e}")
+            return False
+
+    def _get_next_spreadsheet_row(self) -> int:
+        """Obtiene la siguiente fila disponible"""
+        users = self.read_spreadsheet_users()
+        if not users:
+            return 2
+        return max(u['row'] for u in users) + 1
+
+    def add_user_to_spreadsheet(self, cliente: str, nombre: str, nickname: str,
+                                 whatsapp: str, rol: str = "cliente") -> int:
+        """Agrega usuario a la hoja WHATSAPP BBDD. Retorna el row number o 0 si falla."""
+        try:
+            row = self._get_next_spreadsheet_row()
+            commands = []
+            data = [(0, cliente), (1, nombre), (2, nickname), (3, whatsapp), (4, rol)]
+            for col, val in data:
+                if val:
+                    commands.append({
+                        "type": "UPDATE_CELL", "sheetId": "sheet1",
+                        "col": col, "row": row - 1, "content": str(val)
+                    })
+            if commands and self._dispatch_spreadsheet_cmd(commands):
+                logger.info(f"📝 Usuario agregado al spreadsheet fila {row}: {nombre}")
+                return row
+            return 0
+        except Exception as e:
+            logger.error(f"❌ Error agregando usuario al spreadsheet: {e}")
+            return 0
+
+    def update_spreadsheet_cell(self, row: int, col: int, value: str) -> bool:
+        """Actualiza una celda específica del spreadsheet"""
+        return self._dispatch_spreadsheet_cmd([{
+            "type": "UPDATE_CELL", "sheetId": "sheet1",
+            "col": col, "row": row - 1, "content": str(value)
+        }])
+
+    def get_user_clave(self, phone: str) -> str:
+        """Obtiene la clave actual de un usuario desde el spreadsheet (lectura fresca)"""
+        user = self.find_user_by_phone(phone)
+        return user.get('clave', '') if user else ''
+
 # ══════════════════════════════════════════════════════════════════════════════
 # APLICACIÓN FASTAPI
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CACHÉ DE USUARIOS WHATSAPP
+# ══════════════════════════════════════════════════════════════════════════════
+
+class UserCache:
+    """Caché en memoria para usuarios de WhatsApp"""
+
+    def __init__(self):
+        self.users = {}
+        self.employee_daily_checks = {}
+        self.pending_key = set()
+
+    def get(self, phone: str) -> Optional[Dict]:
+        clean = phone.strip().replace("+", "")
+        for k, v in self.users.items():
+        if k == clean or k.endswith(clean[-10:]) or clean.endswith(k[-10:]):
+                return v
+        return None
+
+    def set(self, phone: str, data: Dict):
+        clean = phone.strip().replace("+", "")
+        self.users[clean] = data
+
+    def is_employee_validated_today(self, phone: str) -> bool:
+        clean = phone.strip().replace("+", "")
+        last = self.employee_daily_checks.get(clean)
+        return last == datetime.now().strftime("%Y-%m-%d")
+
+    def mark_employee_validated(self, phone: str):
+        clean = phone.strip().replace("+", "")
+        self.employee_daily_checks[clean] = datetime.now().strftime("%Y-%m-%d")
+
+    def set_pending_key(self, phone: str):
+        clean = phone.strip().replace("+", "")
+        self.pending_key.add(clean)
+
+    def is_pending_key(self, phone: str) -> bool:
+        clean = phone.strip().replace("+", "")
+        return clean in self.pending_key
+
+    def clear_pending_key(self, phone: str):
+        clean = phone.strip().replace("+", "")
+        self.pending_key.discard(clean)
+
+user_cache = UserCache()
+
+def get_user_from_db(phone: str) -> Optional[Dict]:
+    """Busca usuario en SQLite local"""
+    conn = sqlite3.connect("sonia_conversations.db")
+    cursor = conn.cursor()
+    clean = phone.strip().replace("+", "")
+    cursor.execute("SELECT phone, cliente, nombre, nickname, rol, spreadsheet_row FROM whatsapp_users WHERE phone = ?", (clean,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {'whatsapp': row[0], 'cliente': row[1], 'nombre': row[2], 'nickname': row[3], 'rol': row[4], 'clave': '', 'row': row[5]}
+    return None
+
+def save_user_to_db(phone: str, cliente: str, nombre: str, nickname: str, rol: str = "cliente", spreadsheet_row: int = 0):
+    """Guarda usuario en SQLite local"""
+    conn = sqlite3.connect("sonia_conversations.db")
+    cursor = conn.cursor()
+    clean = phone.strip().replace("+", "")
+    cursor.execute("""
+        INSERT OR REPLACE INTO whatsapp_users (phone, cliente, nombre, nickname, rol, spreadsheet_row, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (clean, cliente, nombre, nickname, rol, spreadsheet_row))
+    conn.commit()
+    conn.close()
+
+def get_display_name(user_data: Dict) -> str:
+    """Obtiene el nombre para mostrar: nickname > primer nombre"""
+    if user_data.get('nickname'):
+        return user_data['nickname']
+    nombre = user_data.get('nombre', '')
+    if nombre:
+        return nombre.split()[0]
+    return "amigo/a"
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 @asynccontextmanager
@@ -1424,9 +1672,90 @@ async def handle_webhook(request: Request):
         # Guardar mensaje del usuario
         save_message(conversation_id, "user", user_text, message_type)
 
-        # Procesar con Claude
+        
+        # ===== IDENTIFICACIÓN DE USUARIO =====
+        user_data = user_cache.get(from_number)
+
+        # Si no está en caché, buscar en SQLite
+        if not user_data:
+            user_data = get_user_from_db(from_number)
+            if user_data:
+                user_cache.set(from_number, user_data)
+
+        # Si no está en SQLite, buscar en Odoo spreadsheet
+        if not user_data:
+            try:
+                odoo_lookup = OdooClient()
+                user_data = odoo_lookup.find_user_by_phone(from_number)
+                if user_data:
+                    user_cache.set(from_number, user_data)
+                    save_user_to_db(from_number, user_data.get('cliente', ''), user_data.get('nombre', ''),
+                                    user_data.get('nickname', ''), user_data.get('rol', 'cliente'),
+                                    user_data.get('row', 0))
+            except Exception as e:
+                logger.warning(f"⚠️ Error buscando usuario en Odoo: {e}")
+
+        # Manejar estado pending_key (empleado debe dar clave)
+        if user_cache.is_pending_key(from_number):
+            user_cache.clear_pending_key(from_number)
+            if user_data:
+                try:
+                    odoo_key = OdooClient()
+                    fresh_clave = odoo_key.get_user_clave(from_number)
+                except Exception:
+                    fresh_clave = ""
+                if fresh_clave:
+                    if user_text.strip() == fresh_clave.strip():
+                        user_cache.mark_employee_validated(from_number)
+                        dn = get_display_name(user_data)
+                       response_message = f"✅ Clave verificada. ¡Bienvenido/a {dn}! ¿En qué puedo ayudarte hoy?"
+                    else:
+                        response_message = "❌ Clave incorrecta. Intenta de nuevo escribiendo tu clave."
+                        user_cache.set_pending_key(from_number)
+                else:
+                    response_message = "⏳ Tu clave aún no ha sido configurada por el administrador. Puedes seguir usando el servicio mientras tanto. ¿En qué puedo ayudarte?"
+            else:
+                response_message = "No pude verificar tu información. ¿Podrías intentar de nuevo?"
+            save_message(conversation_id, "user", user_text, message_type)
+            save_message(conversation_id, "assistant", response_message)
+            await whatsapp.send_message(from_number, response_message)
+            return {"status": "key_validation"}
+
+        # Verificación diaria de empleados
+        if user_data and user_data.get('rol', '').lower() == 'empleado':
+            if not user_cache.is_employee_validated_today(from_number):
+                try:
+                    odoo_check = OdooClient()
+                    fresh_clave = odoo_check.get_user_clave(from_number)
+                except Exception:
+                    fresh_clave = ""
+                if fresh_clave:
+                    user_cache.set_pending_key(from_number)
+                    dn = get_display_name(user_data)
+                    save_message(conversation_id, "user", user_text, message_type)
+                    response_message = f"¡Hola {dn}! 👋 Para continuar hoy necesito verificar tu identidad. Por favor escribe tu clave de acceso:"
+                    save_message(conversation_id, "assistant", response_message)
+                    await whatsapp.send_message(from_number, response_message)
+                    return {"status": "key_required"}
+
+        # Construir contexto de usuario para Claude
+        user_context = ""
+        if user_data:
+            dn = get_display_name(user_data)
+            rol = user_data.get('rol', 'cliente').lower()
+            if rol == 'empleado':
+                if user_cache.is_employee_validated_today(from_number):
+                    user_context = f"CONTEXTO USUARIO: Empleado VERIFICADO de BloomsPal. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: BloomsPal."
+                else:
+                    user_context = f"CONTEXTO USUARIO: Empleado de BloomsPal (sin clave configurada aún). Nombre: {user_data['nombre']}. Llámalo '{dn}'."
+            else:
+                user_context = f"CONTEXTO USUARIO: Cliente registrado. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: {user_data.get('cliente', 'No especificada')}."
+        else:
+            user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. Debes recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, usa action 'register_user'."
+
+# Procesar con Claude
         logger.info("🤖 Procesando con Claude AI...")
-        response = await processor.process_text(user_text, history)
+        response = await processor.process_text(user_text, history, user_context)
 
         action = response.get("action", "chat")
         response_message = response.get("message", "")
@@ -1587,6 +1916,49 @@ Nuestro equipo de ventas revisará los detalles y te contactará para confirmar 
             else:
                 response_message = f"❌ No pudimos registrar tu orden. Por favor intenta de nuevo o escribe a customer-care@bloomspal.odoo.com\n\nError: {ticket_result.get('error', 'desconocido')}"
 # Si es una solicitud de contacto
+
+        # Si es un registro de nuevo usuario
+        elif action == "register_user":
+            reg_data = response.get("data", {})
+            nombre = reg_data.get("nombre", "")
+            cliente = reg_data.get("cliente", "")
+            nickname = reg_data.get("nickname", "")
+
+            try:
+                odoo_reg = OdooClient()
+                ss_row = odoo_reg.add_user_to_spreadsheet(
+                    cliente=cliente, nombre=nombre, nickname=nickname,
+                    whatsapp=from_number, rol="cliente"
+                )
+            except Exception as e:
+                logger.error(f"❌ Error escribiendo en spreadsheet: {e}")
+                ss_row = 0
+
+            save_user_to_db(from_number, cliente, nombre, nickname, "cliente", ss_row)
+            new_user = {'cliente': cliente, 'nombre': nombre, 'nickname': nickname,
+                        'whatsapp': from_number, 'rol': 'cliente', 'clave': '', 'row': ss_row}
+            user_cache.set(from_number, new_user)
+            logger.info(f"👤 Usuario registrado: {nombre} ({cliente}) - {from_number}")
+
+        # Si alguien dice que es empleado
+        elif action == "claim_employee":
+            if user_data:
+                try:
+                    odoo_emp = OdooClient()
+                    if user_data.get('row', 0) > 0:
+                        odoo_emp.update_spreadsheet_cell(user_data['row'], 4, "empleado")
+                except Exception as e:
+                    logger.error(f"❌ Error actualizando rol en spreadsheet: {e}")
+                user_data['rol'] = 'empleado'
+                user_cache.set(from_number, user_data)
+                save_user_to_db(from_number, user_data.get('cliente', ''), user_data.get('nombre', ''),
+                                user_data.get('nickname', ''), 'empleado', user_data.get('row', 0))
+                dn = get_display_name(user_data)
+                response_message = f"✅ Te he registrado como empleado de BloomsPal, {dn}. Tu administrador te asignará una clave de acceso. Cuando la tengas, podrás verificarte cada día para acceder a funciones de empleado.\n\n¿Necesitas algo más?"
+                logger.info(f"👔 Usuario marcado como empleado: {user_data.get('nombre', '')} - {from_number}")
+            else:
+                response_message = "Primero necesito registrarte. ¿Cuál es tu nombre completo y a qué empresa perteneces?"
+
         elif action == "contact":
             contact_data = response.get("data", {})
             query = contact_data.get("query", "")
