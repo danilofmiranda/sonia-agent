@@ -169,6 +169,7 @@ def init_database():
             nickname TEXT DEFAULT '',
             rol TEXT DEFAULT 'cliente',
             spreadsheet_row INTEGER DEFAULT 0,
+            bloqueo TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -1345,6 +1346,7 @@ class OdooClient:
                     'whatsapp': d,
                     'rol': cells.get(f"E{row}", ""),
                     'clave': cells.get(f"F{row}", ""),
+                    'bloqueo': cells.get(f"G{row}", ""),
                     'row': row
                 })
                 row += 1
@@ -1491,22 +1493,22 @@ def get_user_from_db(phone: str) -> Optional[Dict]:
     conn = sqlite3.connect("sonia_conversations.db")
     cursor = conn.cursor()
     clean = phone.strip().replace("+", "")
-    cursor.execute("SELECT phone, cliente, nombre, nickname, rol, spreadsheet_row FROM whatsapp_users WHERE phone = ?", (clean,))
+    cursor.execute("SELECT phone, cliente, nombre, nickname, rol, spreadsheet_row, bloqueo FROM whatsapp_users WHERE phone = ?", (clean,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        return {'whatsapp': row[0], 'cliente': row[1], 'nombre': row[2], 'nickname': row[3], 'rol': row[4], 'clave': '', 'row': row[5]}
+        return {'whatsapp': row[0], 'cliente': row[1], 'nombre': row[2], 'nickname': row[3], 'rol': row[4], 'clave': '', 'row': row[5], 'bloqueo': row[6] if len(row) > 6 else ''}
     return None
 
-def save_user_to_db(phone: str, cliente: str, nombre: str, nickname: str, rol: str = "cliente", spreadsheet_row: int = 0):
+def save_user_to_db(phone: str, cliente: str, nombre: str, nickname: str, rol: str = "cliente", spreadsheet_row: int = 0, bloqueo: str = ""):
     """Guarda usuario en SQLite local"""
     conn = sqlite3.connect("sonia_conversations.db")
     cursor = conn.cursor()
     clean = phone.strip().replace("+", "")
     cursor.execute("""
-        INSERT OR REPLACE INTO whatsapp_users (phone, cliente, nombre, nickname, rol, spreadsheet_row, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (clean, cliente, nombre, nickname, rol, spreadsheet_row))
+        INSERT OR REPLACE INTO whatsapp_users (phone, cliente, nombre, nickname, rol, spreadsheet_row, bloqueo, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (clean, cliente, nombre, nickname, rol, spreadsheet_row, bloqueo))
     conn.commit()
     conn.close()
 
@@ -1533,6 +1535,14 @@ async def lifespan(app: FastAPI):
     validate_environment()
 
     init_database()
+
+        # Migración: agregar columna bloqueo si no existe
+    try:
+        cursor.execute("ALTER TABLE whatsapp_users ADD COLUMN bloqueo TEXT DEFAULT ''")
+        conn.commit()
+        logger.info("📋 Columna 'bloqueo' agregada a whatsapp_users")
+    except Exception:
+        pass  # La columna ya existe
 
     logger.info("✅ Base de datos inicializada")
     logger.info("✅ SonIA WhatsApp Agent LISTO y escuchando")
@@ -1700,9 +1710,14 @@ async def handle_webhook(request: Request):
                     user_cache.set(from_number, user_data)
                     save_user_to_db(from_number, user_data.get('cliente', ''), user_data.get('nombre', ''),
                                     user_data.get('nickname', ''), user_data.get('rol', 'cliente'),
-                                    user_data.get('row', 0))
+                                    user_data.get('row', 0), user_data.get('bloqueo', ''))
             except Exception as e:
                 logger.warning(f"⚠️ Error buscando usuario en Odoo: {e}")
+
+        # ===== BLOQUEO DE USUARIO =====
+        if user_data and user_data.get('bloqueo', '').strip().upper() == 'SI':
+            logger.info(f"⛔ Mensaje ignorado de usuario bloqueado: {from_number}")
+            return JSONResponse(content={"status": "blocked"}, status_code=200)
 
         # Manejar estado pending_key (empleado debe dar clave)
         if user_cache.is_pending_key(from_number):
