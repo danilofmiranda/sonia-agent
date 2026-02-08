@@ -1446,7 +1446,7 @@ class UserCache:
     def get(self, phone: str) -> Optional[Dict]:
         clean = phone.strip().replace("+", "")
         for k, v in self.users.items():
-        if k == clean or k.endswith(clean[-10:]) or clean.endswith(k[-10:]):
+            if k == clean or k.endswith(clean[-10:]) or clean.endswith(k[-10:]):
                 return v
         return None
 
