@@ -56,6 +56,8 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # FedEx API
 FEDEX_API_KEY = os.getenv("FEDEX_API_KEY", "l7e4ca666923294740bae8dfde52ca1f52")
 FEDEX_SECRET_KEY = os.getenv("FEDEX_SECRET_KEY", "81d7f9db60554e9b97ffa7c76075763c")
+FEDEX_TRACK_API_KEY = os.getenv("FEDEX_TRACK_API_KEY", FEDEX_API_KEY)
+FEDEX_TRACK_SECRET_KEY = os.getenv("FEDEX_TRACK_SECRET_KEY", FEDEX_SECRET_KEY)
 FEDEX_ACCOUNT_USA = os.getenv("FEDEX_ACCOUNT_USA", "202958384")  # Andean-2 (legacy var, misma cuenta)
 FEDEX_ACCOUNT_WORLD = os.getenv("FEDEX_ACCOUNT_WORLD", "202958384")  # Andean-2
 FEDEX_BASE_URL = "https://apis.fedex.com"
@@ -416,9 +418,9 @@ def get_short_status(status_code: str, description: str) -> str:
 class FedExClient:
     """Cliente para interactuar con FedEx API"""
 
-    def __init__(self):
-        self.api_key = FEDEX_API_KEY
-        self.secret_key = FEDEX_SECRET_KEY
+    def __init__(self, api_key=None, secret_key=None):
+        self.api_key = api_key or FEDEX_API_KEY
+        self.secret_key = secret_key or FEDEX_SECRET_KEY
         self.base_url = FEDEX_BASE_URL
         self.token = None
         self.token_expires = None
@@ -995,7 +997,7 @@ class TrackingProcessor:
     """Procesa información de rastreo de envíos"""
 
     def __init__(self):
-        self.fedex = FedExClient()
+        self.fedex = FedExClient(api_key=FEDEX_TRACK_API_KEY, secret_key=FEDEX_TRACK_SECRET_KEY)
 
     async def track(self, tracking_number: str) -> Dict:
         """Obtiene y procesa información de rastreo"""
