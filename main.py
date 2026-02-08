@@ -1,10 +1,10 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                         SonIA - WhatsApp Quotation Agent                       ║
-║                              BloomsPal / Andean Fields                         ║
+║                              BloomsPal Logistics                         ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 
-Agente de WhatsApp para cotizaciones de envío FedEx.
+Agente de WhatsApp para cotizaciones de envío - BloomsPal Logistics.
 - Recibe mensajes de texto y audio via WhatsApp
 - Procesa con Claude AI para extraer información
 - Consulta FedEx API para cotizaciones
@@ -540,8 +540,8 @@ class FedExClient:
 class SonIAProcessor:
     """Procesador de mensajes usando Claude AI"""
 
-    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de cotizaciones de BloomsPal/Andean Fields.
-Tu trabajo es ayudar a los clientes a obtener cotizaciones de envío FedEx.
+    SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de cotizaciones de BloomsPal Logistics.
+Tu trabajo es ayudar a los clientes a obtener cotizaciones de envío.
 
 INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
 1. País de ORIGEN del envío
@@ -557,10 +557,10 @@ INFORMACIÓN QUE NECESITAS EXTRAER (TODAS SON OBLIGATORIAS):
 11. Valor declarado de la mercancía en USD - OBLIGATORIO, siempre preguntar
 
 REGLAS DE PRECIOS:
-- Cajas sueltas < 70kg desde Colombia a USA: $5 USD/kg + $8 USD por dirección (precio fijo, no necesita cotizar FedEx)
-- Pallets a cualquier destino: Cotizar con FedEx API
-- Cajas sueltas ≥ 70kg a USA: Cotizar con FedEx API
-- Cualquier envío fuera de USA: Cotizar con FedEx API
+- Cajas sueltas < 70kg desde Colombia a USA: $5 USD/kg + $8 USD por dirección (precio fijo)
+- Pallets a cualquier destino: Cotizar con el sistema
+- Cajas sueltas ≥ 70kg a USA: Cotizar con el sistema
+- Cualquier envío fuera de USA: Cotizar con el sistema
 - SIEMPRE cotizar la opción más económica disponible
 
 COMPORTAMIENTO:
@@ -616,7 +616,9 @@ Si es una conversación general:
 IMPORTANTE: Responde SIEMPRE con un JSON válido. No incluyas texto fuera del JSON.
 
 Siempre responde en español, de forma amigable y profesional.
-Empresa: BloomsPal / Andean Fields (CI ANDEAN FIELDS)"""
+IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico al cliente. Siempre habla de "BloomsPal Logistics" como el servicio de envío. No reveles nombres de transportistas.
+
+Empresa: BloomsPal Logistics"""
 
     def __init__(self):
         # CORREGIDO: Usar cliente ASÍNCRONO en vez de síncrono
@@ -846,15 +848,15 @@ class QuoteCalculator:
             error_details = fedex_response.get("details", "")
             if error_msg:
                 result["success"] = False
-                result["details"] = f"Error FedEx: {error_msg}. {error_details}"
+                result["details"] = f"Error en el sistema de cotización. Por favor intente de nuevo."
                 return result
 
             result["success"] = False
-            result["details"] = "No se pudo obtener cotización de FedEx. Por favor contacte a soporte."
+            result["details"] = "No se pudo obtener cotización en este momento. Por favor contacte a soporte."
 
         except Exception as e:
             result["success"] = False
-            result["details"] = f"Error al consultar FedEx: {str(e)}"
+            result["details"] = f"Error al consultar el sistema de cotización: {str(e)}"
 
         return result
 
@@ -886,7 +888,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SonIA - WhatsApp Quotation Agent",
-    description="Agente de WhatsApp para cotizaciones de envío FedEx - BloomsPal",
+    description="Agente de WhatsApp para cotizaciones de envío - BloomsPal Logistics",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -904,7 +906,7 @@ async def root():
         "status": "online",
         "service": "SonIA WhatsApp Agent",
         "version": "1.0.0",
-        "company": "BloomsPal / Andean Fields"
+        "company": "BloomsPal Logistics"
     }
 
 
@@ -1044,17 +1046,17 @@ async def handle_webhook(request: Request):
                 num_pkgs = len(quote_data.get('packages', [])) or quote_data.get('num_boxes', 1)
                 declared_val = quote_data.get('declared_value', 0)
 
-                response_message = f"""✅ *COTIZACIÓN SonIA*
+                response_message = f"""✅ *COTIZACIÓN BloomsPal Logistics*
 
 📤 *Origen:* {origin_info} (CP {quote_data.get('origin_postal', '')})
 📍 *Destino:* {dest_info} (CP {quote_data.get('destination_postal', '')})
 📦 *Peso total:* {quote_data.get('weight_kg', 0)} kg
 {'🎁 *Paletizado:* Sí' if quote_data.get('is_pallet') else f'📦 *Paquetes:* {num_pkgs}'}
 💎 *Valor declarado:* ${declared_val:,.2f} USD
-🚛 *Recogida:* FedEx recoge en dirección de origen
+🚛 *Recogida:* En dirección de origen
 
 💰 *PRECIO MÁS ECONÓMICO: ${quote_result['amount']:.2f} USD*
-🏷️ *Servicio:* {quote_result.get('service_name', quote_result.get('service_type', 'FedEx'))}
+🏷️ *Servicio:* {'BloomsPal Logistics'}
 📅 *Tiempo estimado:* {quote_result.get('transit_days', 'N/A')} días
 ⚖️ *Costo por kilo:* ${quote_result['amount'] / quote_data.get('weight_kg', 1):.2f} USD/kg
 
@@ -1063,9 +1065,9 @@ async def handle_webhook(request: Request):
                 # Agregar otros servicios disponibles si hay más de uno
                 all_services = quote_result.get("all_services", [])
                 if len(all_services) > 1:
-                    response_message += "\n\n📋 *Otros servicios disponibles:*"
-                    for svc in all_services[1:4]:
-                        response_message += f"\n  • {svc['service_name']}: ${svc['total_charge']:.2f} USD ({svc['transit_days']} días)"
+                    response_message += "\n\n📋 *Otras opciones disponibles:*"
+                    for i, svc in enumerate(all_services[1:4], 2):
+                        response_message += f"\n  • Opción {i}: ${svc['total_charge']:.2f} USD ({svc['transit_days']} días)"
 
                 response_message += "\n\n¿Deseas proceder con este envío? Responde *SÍ* para confirmar o escríbeme si necesitas otra cotización."
 
