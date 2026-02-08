@@ -1067,7 +1067,8 @@ async def handle_webhook(request: Request):
                 if len(all_services) > 1:
                     response_message += "\n\n📋 *Otras opciones disponibles:*"
                     for i, svc in enumerate(all_services[1:4], 2):
-                        response_message += f"\n  • Opción {i}: ${svc['total_charge']:.2f} USD ({svc['transit_days']} días)"
+                        svc_cost_per_kg = svc['total_charge'] / (quote_data.get('weight_kg', 1) or 1)
+                        response_message += f"\n  • Opción {i}: ${svc['total_charge']:.2f} USD | {svc['transit_days']} días | ${svc_cost_per_kg:.2f} USD/kg"
 
                 response_message += "\n\n¿Deseas proceder con este envío? Responde *SÍ* para confirmar o escríbeme si necesitas otra cotización."
 
