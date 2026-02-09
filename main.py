@@ -1460,6 +1460,7 @@ class UserCache:
         self.users = {}
         self.employee_daily_checks = {}
         self.pending_key = set()
+        self.last_odoo_check = {}
 
     def get(self, phone: str) -> Optional[Dict]:
         clean = phone.strip().replace("+", "")
@@ -1471,6 +1472,28 @@ class UserCache:
     def set(self, phone: str, data: Dict):
         clean = phone.strip().replace("+", "")
         self.users[clean] = data
+
+    def remove(self, phone: str):
+        """Elimina usuario del caché"""
+        clean = phone.strip().replace("+", "")
+        keys_to_remove = [k for k in self.users if k == clean or k.endswith(clean[-10:]) or clean.endswith(k[-10:])]
+        for k in keys_to_remove:
+            del self.users[k]
+        self.last_odoo_check.pop(clean, None)
+
+    def needs_odoo_recheck(self, phone: str, interval_minutes: int = 15) -> bool:
+        """Verifica si necesita re-consultar Odoo (cada interval_minutes)"""
+        clean = phone.strip().replace("+", "")
+        last = self.last_odoo_check.get(clean)
+        if not last:
+            return True
+        return (datetime.now() - last).total_seconds() > interval_minutes * 60
+
+    def mark_odoo_checked(self, phone: str):
+        """Marca que se verificó contra Odoo"""
+        clean = phone.strip().replace("+", "")
+        self.last_odoo_check[clean] = datetime.now()
+
 
     def is_employee_validated_today(self, phone: str) -> bool:
         clean = phone.strip().replace("+", "")
@@ -1518,6 +1541,16 @@ def save_user_to_db(phone: str, cliente: str, nombre: str, nickname: str, rol: s
     """, (clean, cliente, nombre, nickname, rol, spreadsheet_row, bloqueo))
     conn.commit()
     conn.close()
+
+def delete_user_from_db(phone: str):
+    """Elimina usuario de SQLite local"""
+    conn = sqlite3.connect("sonia_conversations.db")
+    cursor = conn.cursor()
+    clean = phone.strip().replace("+", "")
+    cursor.execute("DELETE FROM whatsapp_users WHERE phone = ?", (clean,))
+    conn.commit()
+    conn.close()
+    logger.info(f"🗑️ Usuario {clean} eliminado de SQLite")
 
 def get_display_name(user_data: Dict) -> str:
     """Obtiene el nombre para mostrar: nickname > primer nombre"""
@@ -1721,7 +1754,27 @@ async def handle_webhook(request: Request):
             except Exception as e:
                 logger.warning(f"⚠️ Error buscando usuario en Odoo: {e}")
 
-        # ===== BLOQUEO DE USUARIO =====
+                # ===== RE-VERIFICACIÓN CONTRA ODOO (cada 15 min) =====
+        if user_data and user_cache.needs_odoo_recheck(from_number):
+            try:
+                odoo_verify = OdooClient()
+                odoo_user = odoo_verify.find_user_by_phone(from_number)
+                if not odoo_user:
+                    logger.info(f"🔄 Usuario {from_number} eliminado de Odoo, limpiando caché y SQLite")
+                    user_cache.remove(from_number)
+                    delete_user_from_db(from_number)
+                    user_data = None
+                else:
+                    user_cache.set(from_number, odoo_user)
+                    user_data = odoo_user
+                    save_user_to_db(from_number, odoo_user.get('cliente', ''), odoo_user.get('nombre', ''),
+                                    odoo_user.get('nickname', ''), odoo_user.get('rol', 'cliente'),
+                                    odoo_user.get('row', 0), odoo_user.get('bloqueo', ''))
+                user_cache.mark_odoo_checked(from_number)
+            except Exception as e:
+                logger.warning(f"⚠️ Error re-verificando usuario en Odoo: {e}")
+
+# ===== BLOQUEO DE USUARIO =====
         if user_data and user_data.get('bloqueo', '').strip().upper() == 'SI':
             logger.info(f"⛔ Mensaje ignorado de usuario bloqueado: {from_number}")
             return JSONResponse(content={"status": "blocked"}, status_code=200)
