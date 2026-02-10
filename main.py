@@ -2236,7 +2236,7 @@ async def api_send_message(req: SendMessageRequest, request: Request):
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     try:
-        result = whatsapp.send_message(req.phone_number, req.message)
+        result = await whatsapp.send_message(req.phone_number, req.message)
         return {
             "status": "sent",
             "phone_number": req.phone_number,
@@ -2261,7 +2261,7 @@ async def api_send_report(req: SendReportRequest, request: Request):
         if req.client_name:
             report_text = f"📦 *Reporte de Tracking - {req.client_name}*\n\n{req.report}"
         
-        result = whatsapp.send_message(req.phone_number, report_text)
+        result = await whatsapp.send_message(req.phone_number, report_text)
         return {
             "status": "sent",
             "phone_number": req.phone_number,
