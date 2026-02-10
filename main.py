@@ -2187,6 +2187,70 @@ async def get_stats():
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PUNTO DE ENTRADA
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# API ENDPOINTS (para SonIA Core)
+# ══════════════════════════════════════════════════════════════════════════════
+
+SONIA_CORE_API_KEY = os.getenv("SONIA_CORE_API_KEY", "sonia-core-2026")
+
+class SendMessageRequest(BaseModel):
+    phone_number: str
+    message: str
+
+class SendReportRequest(BaseModel):
+    phone_number: str
+    report: str
+    client_name: str = ""
+
+
+@app.post("/api/send-message")
+async def api_send_message(req: SendMessageRequest, request: Request):
+    """Endpoint para que SonIA Core envíe mensajes directos por WhatsApp."""
+    # Verificar API key
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != SONIA_CORE_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    try:
+        result = whatsapp.send_message(req.phone_number, req.message)
+        return {
+            "status": "sent",
+            "phone_number": req.phone_number,
+            "message_id": result.get("messages", [{}])[0].get("id", "unknown") if isinstance(result, dict) else "sent"
+        }
+    except Exception as e:
+        logger.error(f"Error sending message to {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/send-report")
+async def api_send_report(req: SendReportRequest, request: Request):
+    """Endpoint para que SonIA Core envíe reportes de tracking por WhatsApp."""
+    # Verificar API key
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != SONIA_CORE_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    try:
+        # Agregar encabezado si hay nombre de cliente
+        report_text = req.report
+        if req.client_name:
+            report_text = f"📦 *Reporte de Tracking - {req.client_name}*\n\n{req.report}"
+        
+        result = whatsapp.send_message(req.phone_number, report_text)
+        return {
+            "status": "sent",
+            "phone_number": req.phone_number,
+            "client_name": req.client_name,
+            "message_id": result.get("messages", [{}])[0].get("id", "unknown") if isinstance(result, dict) else "sent"
+        }
+    except Exception as e:
+        logger.error(f"Error sending report to {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
