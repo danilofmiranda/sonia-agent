@@ -769,9 +769,9 @@ IMPORTANTE: NUNCA menciones FedEx ni ningún proveedor de transporte específico
 
 SOPORTE Y CONTACTO (ODOO):
 IMPORTANTE - ANTES de crear CUALQUIER ticket (soporte u orden):
-- SIEMPRE pregunta al cliente: "¿Cuál es el nombre de tu compañía?" y "¿Cuál es tu nombre?"
+- Si el CONTEXTO USUARIO ya tiene nombre y empresa, USA esos datos directamente. NO vuelvas a preguntar.
+- Solo pregunta nombre y empresa si NO están en el CONTEXTO USUARIO (usuario nuevo o datos faltantes).
 - NO generes el JSON de action "support" ni "order" hasta tener AMBOS datos (nombre persona + compañía)
-- Usa action "chat" para hacer las preguntas primero
 
 Si el cliente necesita:
 1. Crear un caso de soporte/queja/reclamo (SOLO cuando ya tengas nombre y compañía):
@@ -796,7 +796,7 @@ Si el cliente necesita:
 }
 
 3. OPORTUNIDAD DE VENTA - Cuando el cliente dice SÍ/proceder/confirmar después de una cotización:
-IMPORTANTE: Antes de crear la orden, pregunta "¿Cuál es el nombre de tu compañía?" y "¿Cuál es tu nombre?"
+IMPORTANTE: Si el CONTEXTO USUARIO ya tiene nombre y empresa, úsalos directamente para la orden. Solo pregunta si NO están disponibles.
 {
     "action": "order",
     "data": {
@@ -1829,11 +1829,11 @@ async def handle_webhook(request: Request):
             rol = user_data.get('rol', 'cliente').lower()
             if rol == 'empleado':
                 if user_cache.is_employee_validated_today(from_number):
-                    user_context = f"CONTEXTO USUARIO: Empleado VERIFICADO de BloomsPal. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: BloomsPal."
+                    user_context = f"CONTEXTO USUARIO: Empleado VERIFICADO de BloomsPal. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: BloomsPal. NOTA: Ya tienes sus datos, NO le pidas nombre ni empresa."
                 else:
-                    user_context = f"CONTEXTO USUARIO: Empleado de BloomsPal (sin clave configurada aún). Nombre: {user_data['nombre']}. Llámalo '{dn}'."
+                    user_context = f"CONTEXTO USUARIO: Empleado de BloomsPal (sin clave configurada aún). Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: BloomsPal. NOTA: Ya tienes sus datos, NO le pidas nombre ni empresa."
             else:
-                user_context = f"CONTEXTO USUARIO: Cliente registrado. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: {user_data.get('cliente', 'No especificada')}."
+                user_context = f"CONTEXTO USUARIO: Cliente registrado. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: {user_data.get('cliente', 'No especificada')}. NOTA: Ya tienes nombre y empresa, NO los vuelvas a preguntar."
         else:
             user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. IMPORTANTE: NO proceses cotizaciones, tracking, tickets ni ninguna otra función hasta que el usuario se registre. Tu ÚNICA tarea ahora es recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, usa action 'register_user'."
 
