@@ -669,6 +669,13 @@ class SonIAProcessor:
     SYSTEM_PROMPT = """Eres SonIA, la asistente virtual de BloomsPal.
 Tu trabajo es ayudar a los clientes con cotizaciones de envío y rastreo de guías.
 
+⚠️ REGLA FUNDAMENTAL - FORMATO DE RESPUESTA:
+SIEMPRE responde en formato JSON válido. NUNCA respondas con texto plano.
+Cada respuesta DEBE ser un objeto JSON con "action" y "message".
+Para conversación general usa: {"action": "chat", "message": "tu respuesta"}
+Para registro de usuario usa: {"action": "register_user", "data": {...}, "message": "tu respuesta"}
+NO inventes respuestas de texto libre. TODO debe ir dentro del JSON.
+
 ESTILO DE COMUNICACIÓN:
 - Tono amigable, profesional y siempre dispuesta a ayudar
 - Respuestas CONCISAS y directas, sin rodeos innecesarios
@@ -829,10 +836,12 @@ Al inicio de cada conversación se te proporcionará un CONTEXTO USUARIO con inf
 
 Si el usuario es NUEVO (no registrado):
 - Preséntate como SonIA de BloomsPal
-- Pregúntale su nombre completo y a qué empresa pertenece
-- Pregúntale: "¿Hay algún nombre o apodo por el que prefieras que te llame?"
+- Pregúntale su nombre completo, a qué empresa pertenece, y si tiene algún apodo
+- Puedes preguntar todo en UN SOLO mensaje para ser eficiente
+- Cuando el usuario responda con su nombre y empresa, INMEDIATAMENTE responde con action "register_user"
+- NO respondas con action "chat" cuando ya tengas nombre y empresa - DEBES usar "register_user"
 - Si no quiere nickname, déjalo vacío
-- Cuando tengas nombre y empresa (nickname es opcional), responde con:
+- ⚠️ CRÍTICO: Cuando tengas nombre y empresa, OBLIGATORIAMENTE responde con:
 {
     "action": "register_user",
     "data": {
@@ -1857,7 +1866,7 @@ async def handle_webhook(request: Request):
             else:
                 user_context = f"CONTEXTO USUARIO: Cliente registrado. Nombre: {user_data['nombre']}. Llámalo '{dn}'. Empresa: {user_data.get('cliente', 'No especificada')}. NOTA: Ya tienes nombre y empresa, NO los vuelvas a preguntar."
         else:
-            user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. IMPORTANTE: NO proceses cotizaciones, tracking, tickets ni ninguna otra función hasta que el usuario se registre. Tu ÚNICA tarea ahora es recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, usa action 'register_user'."
+            user_context = f"CONTEXTO USUARIO: Usuario NUEVO, no registrado. Su número de WhatsApp es {from_number}. IMPORTANTE: NO proceses cotizaciones, tracking, tickets ni ninguna otra función hasta que el usuario se registre. Tu ÚNICA tarea ahora es recopilar su información (nombre completo, empresa, y opcionalmente un nickname/apodo). Cuando tengas los datos, DEBES responder con el JSON de action 'register_user' con los campos nombre, cliente y nickname. NUNCA confirmes el registro con un simple chat - SIEMPRE usa el action register_user."
 
 # Procesar con Claude
         logger.info("🤖 Procesando con Claude AI...")
@@ -1872,6 +1881,53 @@ async def handle_webhook(request: Request):
             logger.info(f"🚫 Acción '{action}' bloqueada - usuario no registrado")
             response_message = "Antes de poder ayudarte con eso, necesito conocerte un poco. ¿Podrías decirme tu nombre completo y a qué empresa perteneces?"
             action = "chat"
+
+        # ===== FALLBACK: Extraer registro si Claude respondió chat pero hay datos =====
+        if not user_data and action == "chat" and len(history) >= 2:
+            try:
+                extraction_prompt = f"""Analiza esta conversación y extrae los datos del usuario SI los proporcionó.
+Conversación reciente:
+{chr(10).join([f"{m['role']}: {m['content']}" for m in history[-4:]])}
+Último mensaje del usuario: {user_text}
+Respuesta de SonIA: {response_message}
+
+Si el usuario YA proporcionó su nombre completo y empresa/compañía, responde SOLO con este JSON:
+{{"nombre": "Nombre Completo", "cliente": "Nombre Empresa", "nickname": "apodo o vacío"}}
+
+Si NO hay suficiente información (falta nombre O empresa), responde SOLO: NO_DATA"""
+                
+                extraction_response = await processor.client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": extraction_prompt}]
+                )
+                
+                ext_text = extraction_response.content[0].text.strip()
+                if ext_text != "NO_DATA" and "{" in ext_text:
+                    ext_start = ext_text.find("{")
+                    ext_end = ext_text.rfind("}") + 1
+                    ext_data = json.loads(ext_text[ext_start:ext_end])
+                    if ext_data.get("nombre") and ext_data.get("cliente"):
+                        logger.info(f"🔄 FALLBACK: Extrayendo registro de conversación: {ext_data}")
+                        nombre = ext_data["nombre"]
+                        cliente = ext_data["cliente"]
+                        nickname = ext_data.get("nickname", "")
+                        try:
+                            odoo_reg = OdooClient()
+                            ss_row = odoo_reg.add_user_to_spreadsheet(
+                                cliente=cliente, nombre=nombre, nickname=nickname,
+                                whatsapp=from_number, rol="cliente"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Error fallback spreadsheet: {e}")
+                            ss_row = 0
+                        save_user_to_db(from_number, cliente, nombre, nickname, "cliente", ss_row)
+                        new_user = {'cliente': cliente, 'nombre': nombre, 'nickname': nickname,
+                                    'whatsapp': from_number, 'rol': 'cliente', 'clave': '', 'row': ss_row}
+                        user_cache.set(from_number, new_user)
+                        logger.info(f"✅ FALLBACK registro exitoso: {nombre} ({cliente}) - {from_number}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error en fallback de extracción: {e}")
 
         # Si es una solicitud de cotización
         if action == "quote":
