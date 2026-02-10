@@ -1936,8 +1936,9 @@ async def handle_webhook(request: Request):
             support_data = response.get("data", {})
             subject = support_data.get("subject", "Solicitud de soporte via WhatsApp")
             description = support_data.get("description", response_message)
-            company_name = support_data.get("company_name", "")
-            contact_name = support_data.get("contact_name", "")
+            # Usar datos del JSON de Claude, con fallback a user_data registrado
+            company_name = support_data.get("company_name", "") or (user_data.get('cliente', '') if user_data else "")
+            contact_name = support_data.get("contact_name", "") or (user_data.get('nombre', '') if user_data else "")
 
             # Enriquecer descripción con info de contacto
             full_description = "TICKET DE SOPORTE VIA WHATSAPP\n\n"
@@ -1973,8 +1974,9 @@ Nuestro equipo de atención al cliente revisará tu caso y te contactará pronto
         # Si es una confirmación de orden / oportunidad de venta
         elif action == "order":
             order_data = response.get("data", {})
-            company_name = order_data.get("company_name", "")
-            contact_name = order_data.get("contact_name", "")
+            # Usar datos del JSON de Claude, con fallback a user_data registrado
+            company_name = order_data.get("company_name", "") or (user_data.get('cliente', '') if user_data else "")
+            contact_name = order_data.get("contact_name", "") or (user_data.get('nombre', '') if user_data else "")
             quote_summary = order_data.get("quote_summary", "")
 
             # Construir descripción con todos los detalles
