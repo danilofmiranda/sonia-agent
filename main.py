@@ -1374,6 +1374,20 @@ class OdooClient:
                 return u
         return None
 
+    def _get_sheet_id(self) -> str:
+        """Obtiene el ID real de la primera hoja del spreadsheet"""
+        try:
+            result = self._execute('documents.document', 'read',
+                                   [[ODOO_SPREADSHEET_ID], ['spreadsheet_snapshot']])
+            if result:
+                snapshot = json.loads(base64.b64decode(result[0]['spreadsheet_snapshot']).decode('utf-8'))
+                sheets = snapshot.get('sheets', [])
+                if sheets and 'id' in sheets[0]:
+                    return sheets[0]['id']
+        except Exception as e:
+            logger.warning(f"\u26a0\ufe0f Error obteniendo sheetId: {e}")
+        return "sheet1"  # Fallback al default
+
     def _get_spreadsheet_rev_id(self) -> Optional[str]:
         """Obtiene el revisionId actual del spreadsheet"""
         try:
@@ -1418,26 +1432,33 @@ class OdooClient:
         """Agrega usuario a la hoja WHATSAPP BBDD. Retorna el row number o 0 si falla."""
         try:
             row = self._get_next_spreadsheet_row()
+            sheet_id = self._get_sheet_id()
+            logger.info(f"\U0001f4dd Registrando usuario en fila {row}, sheetId={sheet_id}: {nombre} / {cliente} / {whatsapp}")
             commands = []
             data = [(0, cliente), (1, nombre), (2, nickname), (3, whatsapp), (4, rol)]
             for col, val in data:
                 if val:
                     commands.append({
-                        "type": "UPDATE_CELL", "sheetId": "sheet1",
+                        "type": "UPDATE_CELL", "sheetId": sheet_id,
                         "col": col, "row": row - 1, "content": str(val)
                     })
-            if commands and self._dispatch_spreadsheet_cmd(commands):
-                logger.info(f"📝 Usuario agregado al spreadsheet fila {row}: {nombre}")
-                return row
+            if commands:
+                success = self._dispatch_spreadsheet_cmd(commands)
+                if success:
+                    logger.info(f"\u2705 Usuario registrado OK en spreadsheet fila {row}")
+                    return row
+                else:
+                    logger.error(f"\u274c _dispatch_spreadsheet_cmd retornó False para registro de {nombre}")
             return 0
         except Exception as e:
-            logger.error(f"❌ Error agregando usuario al spreadsheet: {e}")
+            logger.error(f"\u274c Error agregando usuario al spreadsheet: {e}")
             return 0
 
     def update_spreadsheet_cell(self, row: int, col: int, value: str) -> bool:
         """Actualiza una celda específica del spreadsheet"""
+        sheet_id = self._get_sheet_id()
         return self._dispatch_spreadsheet_cmd([{
-            "type": "UPDATE_CELL", "sheetId": "sheet1",
+            "type": "UPDATE_CELL", "sheetId": sheet_id,
             "col": col, "row": row - 1, "content": str(value)
         }])
 
@@ -1755,12 +1776,13 @@ async def handle_webhook(request: Request):
                 logger.warning(f"⚠️ Error buscando usuario en Odoo: {e}")
 
                 # ===== RE-VERIFICACIÓN CONTRA ODOO (cada 15 min) =====
-        if user_data and user_cache.needs_odoo_recheck(from_number):
+        # Solo re-verificar usuarios que ya estaban confirmados en Odoo (row > 0)
+        if user_data and user_data.get('row', 0) > 0 and user_cache.needs_odoo_recheck(from_number):
             try:
                 odoo_verify = OdooClient()
                 odoo_user = odoo_verify.find_user_by_phone(from_number)
                 if not odoo_user:
-                    logger.info(f"🔄 Usuario {from_number} eliminado de Odoo, limpiando caché y SQLite")
+                    logger.info(f"\U0001f504 Usuario {from_number} eliminado de Odoo, limpiando caché y SQLite")
                     user_cache.remove(from_number)
                     delete_user_from_db(from_number)
                     user_data = None
@@ -1772,7 +1794,7 @@ async def handle_webhook(request: Request):
                                     odoo_user.get('row', 0), odoo_user.get('bloqueo', ''))
                 user_cache.mark_odoo_checked(from_number)
             except Exception as e:
-                logger.warning(f"⚠️ Error re-verificando usuario en Odoo: {e}")
+                logger.warning(f"\u26a0\ufe0f Error re-verificando usuario en Odoo: {e}")
 
 # ===== BLOQUEO DE USUARIO =====
         if user_data and user_data.get('bloqueo', '').strip().upper() == 'SI':
