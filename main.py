@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException, Query, File, UploadFile, Form
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 import anthropic
@@ -387,6 +387,60 @@ class WhatsAppClient:
                 await client.post(url, headers=headers, json=payload)
         except Exception as e:
             logger.warning(f"⚠️ No se pudo marcar mensaje como leído: {e}")
+
+    async def send_document(self, to: str, file_data: bytes, filename: str, caption: str = "", mime_type: str = "application/octet-stream") -> Dict:
+        """Envía un documento (archivo) vía WhatsApp Cloud API."""
+        upload_url = f"{self.api_url}/{self.phone_number_id}/media"
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    upload_url,
+                    headers=headers,
+                    files={"file": (filename, file_data, mime_type)},
+                    data={"messaging_product": "whatsapp", "type": mime_type}
+                )
+
+                if response.status_code not in (200, 201):
+                    logger.error(f"❌ Error uploading media: {response.status_code} - {response.text}")
+                    return {"error": f"Media upload failed: {response.status_code}"}
+
+                media_data = response.json()
+                media_id = media_data.get("id")
+                if not media_id:
+                    logger.error(f"❌ No media ID in upload response: {media_data}")
+                    return {"error": "No media ID in upload response"}
+
+            msg_url = f"{self.api_url}/{self.phone_number_id}/messages"
+            msg_headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "document",
+                "document": {
+                    "id": media_id,
+                    "caption": caption or filename,
+                    "filename": filename
+                }
+            }
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(msg_url, headers=msg_headers, json=payload)
+                if response.status_code in (200, 201):
+                    logger.info(f"📎 Documento enviado a {to}: {filename}")
+                    return response.json()
+                else:
+                    logger.error(f"❌ Error sending document: {response.status_code} - {response.text}")
+                    return {"error": f"Send document failed: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"❌ Error en send_document: {e}")
+            return {"error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2326,6 +2380,47 @@ async def api_send_report(req: SendReportRequest, request: Request):
         }
     except Exception as e:
         logger.error(f"Error sending report to {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/send-file")
+async def api_send_file(
+    request: Request,
+    phone_number: str = Form(...),
+    caption: str = Form(""),
+    file: UploadFile = File(...)
+):
+    """Endpoint para enviar archivos (Excel, PDF, etc.) vía WhatsApp."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != SONIA_CORE_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    try:
+        file_data = await file.read()
+        filename = file.filename or "document"
+        mime_type = file.content_type or "application/octet-stream"
+
+        result = await whatsapp.send_document(
+            to=phone_number,
+            file_data=file_data,
+            filename=filename,
+            caption=caption,
+            mime_type=mime_type
+        )
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return {
+            "status": "sent",
+            "phone_number": phone_number,
+            "filename": filename,
+            "message_id": result.get("messages", [{}])[0].get("id", "unknown") if isinstance(result, dict) else "sent"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending file to {phone_number}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
